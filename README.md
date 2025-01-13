@@ -1,0 +1,2 @@
+# BrainCoder
+Understanding EEG Signals
