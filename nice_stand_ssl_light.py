@@ -23,27 +23,30 @@ from torch.autograd import Variable
 from einops.layers.torch import Rearrange
 import copy
 from utils.eeg_utils import EEG_Dataset2
-from utils.losses import cosine_dissimilarity_loss, kld_loss
+from utils.losses import cosine_dissimilarity_loss, kld_loss, SoftmaxThresholdLoss
+from utils.common import CheckpointManager, RunManager
+from archs.FD import FeatureDecomposerV2, ContrastiveLoss,orthogonality_loss,reconstruction_loss
 
 
 gpus = [0]
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, gpus))
 result_path = '/home/jbhol/EEG/gits/BrainCoder/results/' 
+os.makedirs(result_path,exist_ok=True)
 model_idx = 'sub1_nice_ssl'
-
-MODEL_SAVE_PATH = '/home/jbhol/EEG/gits/BrainCoder/model/pretrain/'
-os.makedirs(MODEL_SAVE_PATH,exist_ok=True)
  
 parser = argparse.ArgumentParser(description='Experiment Stimuli Recognition test with CLIP encoder')
 parser.add_argument('--dnn', default='clip', type=str)
+parser.add_argument('--model_output', default='/home/jbhol/EEG/gits/BrainCoder/model/', type=str)
 parser.add_argument('--epoch', default='200', type=int)
-parser.add_argument('--pretrain_epoch', default='5', type=int)
+parser.add_argument('--cycles', default='5', type=int)
+parser.add_argument('--pretrain_fd_epoch', default='25', type=int)
+parser.add_argument('--pretrain_img_epoch', default='200', type=int)
 parser.add_argument('--num_sub', default=1, type=int,
                     help='number of subjects used in the experiments. ')
-parser.add_argument('-batch_size', '--batch-size', default=1024, type=int,
+parser.add_argument('-batch_size', '--batch-size', default=256, type=int,
                     metavar='N',
-                    help='mini-batch size (default: 256), this is the total '
+                    help='mini-batch size (default: 256), this is the total'
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--seed', default=2023, type=int,
@@ -129,15 +132,6 @@ class PatchEmbedding(nn.Module):
         # b, _, _, _ = x.shape
         x = self.tsconv(x)
         x = self.projection(x)
-
-        # x = x.contiguous().view(x.size(0), -1)
-
-        # Multihead Attention
-        # attention_output, _ = self.attention(x, x, x)
-
-        # Output layer
-        # x = self.fc(attention_output)
-
         return x
 
 
@@ -169,63 +163,6 @@ class Enc_eeg(nn.Sequential):
             FlattenHead()
         )
 
-# Define the EEG feature alignment network
-class EEGAlignmentModel(nn.Module):
-    def __init__(self,feature_dim,embedding_dim=768):
-        super(EEGAlignmentModel, self).__init__()
-        
-        # Linear layers for transforming EEG features and subject embeddings
-        self.eeg_transform = nn.Linear(feature_dim + embedding_dim, 256)
-        self.subject_transform = nn.Linear(embedding_dim, 256)
-        self.output_layer = nn.Linear(256+256, embedding_dim)
-
-    def forward(self, eeg_feature, subject_embedding):
-        # Concatenate EEG features and subject embedding
-        combined_input = torch.cat((eeg_feature, subject_embedding), dim=-1)
-        
-        # Transform the combined input
-        transformed_eeg = F.relu(self.eeg_transform(combined_input))
-        subject_adjusted = F.relu(self.subject_transform(subject_embedding))
-        
-        # Apply further processing to obtain aligned EEG features
-        aligned_eeg = self.output_layer(torch.cat((transformed_eeg, subject_adjusted), dim=-1))
-        
-        return aligned_eeg
-
-class EEG_SubjectEmb(nn.Sequential):
-    def __init__(self, embedding_dim=1440, proj_dim=1440, drop_proj=0.5):
-        super().__init__(
-            nn.Linear(embedding_dim, proj_dim),
-            ResidualAdd(nn.Sequential(
-                nn.GELU(),
-                nn.Linear(proj_dim, proj_dim),
-                nn.Dropout(drop_proj),
-            )),
-            nn.LayerNorm(proj_dim),
-        )
-
-    #     self.fc_mu = nn.Linear(embedding_dim, proj_dim)
-    #     self.fc_logvar = nn.Linear(embedding_dim, proj_dim)
-    # def forward(self, input):
-    #     x =  super().forward(input)
-    #     mu = self.fc_mu(x)
-    #     logvar = self.fc_mu(x)
-
-    #     # Reparameterization trick
-    #     z = self.reparameterize(mu, logvar)
-    #     return z
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-
-
-
-
-
-
 class Proj_eeg(nn.Sequential):
     def __init__(self, embedding_dim=1440, proj_dim=768, drop_proj=0.5):
         super().__init__(
@@ -256,7 +193,7 @@ class Proj_img(nn.Sequential):
 
 # Image2EEG
 class IE():
-    def __init__(self, args, nsub):
+    def __init__(self, args, nsub, runId=None):
         super(IE, self).__init__()
         self.args = args
         self.num_class = 200
@@ -264,7 +201,9 @@ class IE():
         self.batch_size_test = 8
         self.batch_size_img = 500 
         self.n_epochs = args.epoch
-        self.pretrain_epoch = args.pretrain_epoch
+        self.pretrain_fd_epoch = args.pretrain_fd_epoch
+        self.pretrain_img_epoch = args.pretrain_img_epoch
+        self.runId = runId
 
         self.lambda_cen = 0.003
         self.alpha = 0.5
@@ -275,6 +214,7 @@ class IE():
         self.b1 = 0.5
         self.b2 = 0.999
         self.nSub = nsub
+        self.cycles = args.cycles
 
         self.start_epoch = 0
         self.eeg_data_path = '/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/Preprocessed_data_250Hz'
@@ -282,7 +222,10 @@ class IE():
         self.test_center_path = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
         self.pretrain = False
 
-        self.log_write = open(result_path + "log_subject%d.txt" % self.nSub, "w")
+        MODEL_SAVE_PATH = self.args.model_output
+        os.makedirs(MODEL_SAVE_PATH,exist_ok=True)
+
+        # self.log_write = open(result_path + "log_subject%d.txt" % self.nSub, "w")
 
         self.Tensor = torch.cuda.FloatTensor
         self.LongTensor = torch.cuda.LongTensor
@@ -290,19 +233,22 @@ class IE():
         self.criterion_l1 = torch.nn.L1Loss().cuda()
         self.criterion_l2 = torch.nn.MSELoss().cuda()
         self.criterion_cls = torch.nn.CrossEntropyLoss().cuda()
+        self.temperature = 0.1
+        # self.commdiffloss = SoftmaxThresholdLoss(alpha=0.3,beta=0.7,temperature=self.temperature).cuda()
+
         self.Enc_eeg = Enc_eeg().cuda()
-        self.eeg_subj_emb = EEG_SubjectEmb().cuda()
-        self.EEGAlignment = EEGAlignmentModel(feature_dim=1440,embedding_dim=768).cuda()
+        # self.eeg_subj_emb = EEG_SubjectEmb().cuda()
+        # self.EEGAlignment = EEGAlignmentModel(feature_dim=1440,embedding_dim=768).cuda()
 
         
         self.Enc_eeg = nn.DataParallel(self.Enc_eeg, device_ids=[i for i in range(len(gpus))])
-        self.eeg_subj_emb = nn.DataParallel(self.eeg_subj_emb, device_ids=[i for i in range(len(gpus))])
-        self.EEGAlignment = nn.DataParallel(self.EEGAlignment, device_ids=[i for i in range(len(gpus))])
+        # self.eeg_subj_emb = nn.DataParallel(self.eeg_subj_emb, device_ids=[i for i in range(len(gpus))])
+        # self.EEGAlignment = nn.DataParallel(self.EEGAlignment, device_ids=[i for i in range(len(gpus))])
 
-        # self.Proj_eeg = Proj_eeg().cuda()
-        # self.Proj_img = Proj_img().cuda()
-        # self.Proj_eeg = nn.DataParallel(self.Proj_eeg, device_ids=[i for i in range(len(gpus))])
-        # self.Proj_img = nn.DataParallel(self.Proj_img, device_ids=[i for i in range(len(gpus))])
+        self.Proj_eeg = Proj_eeg().cuda()
+        self.Proj_img = Proj_img().cuda()
+        self.Proj_eeg = nn.DataParallel(self.Proj_eeg, device_ids=[i for i in range(len(gpus))])
+        self.Proj_img = nn.DataParallel(self.Proj_img, device_ids=[i for i in range(len(gpus))])
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.centers = {}
@@ -353,56 +299,62 @@ class IE():
         loss = (loss_f1 + loss_f2) / 2
         return loss
 
-    def train(self):
+    def feature_decompose(self, runId):
         
-        self.Enc_eeg.apply(weights_init_normal)
-        self.eeg_subj_emb.apply(weights_init_normal)
-        # self.EEGAlignment.apply(weights_init_normal)
-        # self.Proj_eeg.apply(weights_init_normal)
-        # self.Proj_img.apply(weights_init_normal)
+        self.Enc_eeg = Enc_eeg().cuda()
+        self.Enc_eeg = nn.DataParallel(self.Enc_eeg, device_ids=[i for i in range(len(gpus))])
+        # cpm_Enc_eeg = CheckpointManager(prefix="Enc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub1")
+        cpm_Enc_eeg = CheckpointManager(prefix="Enc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
+        # cpm_Enc_eeg.load_checkpoint(model=self.Enc_eeg,optimizer=None,epoch="best")
 
-        # train_eeg, _, test_eeg, test_label = self.get_eeg_data()
-        # train_img_feature, _ = self.get_image_data() 
-        # test_center = np.load(self.test_center_path + 'center_' + self.args.dnn + '.npy', allow_pickle=True)
+        # self.Proj_eeg = Proj_eeg().cuda()
+        # self.Proj_eeg = nn.DataParallel(self.Proj_eeg, device_ids=[i for i in range(len(gpus))])
+        # # cpm_Proj_eeg = CheckpointManager(prefix="Proj_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub1")
+        # cpm_Proj_eeg = CheckpointManager(prefix="Proj_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
+        # # cpm_Proj_eeg.load_checkpoint(model=self.Proj_eeg,optimizer=None,epoch="best")
 
-        # shuffle the training data
-        # train_shuffle = np.random.permutation(len(train_eeg))
-        # train_eeg = train_eeg[train_shuffle]
-        # train_img_feature = train_img_feature[train_shuffle]
-
-        # val_eeg = torch.from_numpy(train_eeg[:740])
-        # val_image = torch.from_numpy(train_img_feature[:740])
-
-        # train_eeg = torch.from_numpy(train_eeg[740:])
-        # train_image = torch.from_numpy(train_img_feature[740:])
-
-        # dataset = torch.utils.data.TensorDataset(train_eeg, train_image)
-        # val_dataset = torch.utils.data.TensorDataset(val_eeg, val_image)
-        # val_dataset = EEG_Dataset2(args=self.args,nsub=1,
-        #           agument_data=True,
-        #           load_individual_files=True,
-        #           subset="val",
-        #           include_neg_sample=False,
-        #           saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata")
-        
-        # self.val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=self.batch_size, shuffle=False)
-
-        # test_eeg = torch.from_numpy(test_eeg)
-        # test_img_feature = torch.from_numpy(test_img_feature)
-        # test_center = torch.from_numpy(test_center)
-        # test_label = torch.from_numpy(test_label)
-        # test_dataset = torch.utils.data.TensorDataset(test_eeg, test_label)
-        # self.test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=self.batch_size_test, shuffle=False)
-
-        # Optimizers
-        # self.optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters(), self.Proj_eeg.parameters(), self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
-        self.optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters(),self.eeg_subj_emb.parameters()), lr=self.lr, betas=(self.b1, self.b2))
-        # self.optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters()), lr=self.lr, betas=(self.b1, self.b2))
+        self.Proj_img = Proj_img().cuda()
+        self.Proj_img = nn.DataParallel(self.Proj_img, device_ids=[i for i in range(len(gpus))])
+        # cpm_Proj_img = CheckpointManager(prefix="Proj_img",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub1")
+        cpm_Proj_img = CheckpointManager(prefix="Proj_img",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
+        # cpm_Proj_img.load_checkpoint(model=self.Proj_img,optimizer=None,epoch="best")
 
         
-        for sub_i in range(2,5):
+        # Models that will be trained
+        self.FD_model = FeatureDecomposerV2(1440, 768)
+        self.FD_model = nn.DataParallel(self.FD_model, device_ids=[i for i in range(len(gpus))])
+        cpm_FD_model = CheckpointManager(prefix="FD_model",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}/G")
+        contrastive_criterion = ContrastiveLoss()
+        lambda_orthojk = 0.1
+        lambda_ortho = 0.2  # Weight for orthogonality loss
+        lambda_recon = 0.1  # Weight for reconstruction loss
+        lambda_img = 0.5
+        lambda_commonality = 0.5
+
+        # self.Enc_eeg_G = Enc_eeg().cuda()
+        # self.Enc_eeg_G = nn.DataParallel(self.Enc_eeg_G, device_ids=[i for i in range(len(gpus))])
+        
+        # self.Proj_eeg_G = Proj_eeg().cuda()
+        # self.Proj_eeg_G = nn.DataParallel(self.Proj_eeg_G, device_ids=[i for i in range(len(gpus))])
+        
+        # self.Proj_img_G = Proj_img().cuda()
+        # self.Proj_img_G = nn.DataParallel(self.Proj_img_G, device_ids=[i for i in range(len(gpus))])
+        
+
+        # cpm_Enc_eeg_G = CheckpointManager(prefix="Enc_eeg_G",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/G")
+        # cpm_Proj_eeg_G = CheckpointManager(prefix="Proj_eeg_G",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/G")
+        # cpm_Proj_img_G = CheckpointManager(prefix="Proj_img_G",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/G")
+
+
+
+        
+        for sub_i in range(2,4):
             num = 0
             best_loss_val = np.inf
+            best_loss_ortho_val = np.inf
+            best_loss_img_val = np.inf
+            best_loss_recon_val = np.inf
+
             dataset = EEG_Dataset2(args=self.args,nsub=self.args.num_sub,
                     agument_data=True,
                     load_individual_files=True,
@@ -417,21 +369,67 @@ class IE():
             self.margin = 1.0
 
 
-            # train_subject_embeddings_after_n_epochs = self.pretrain_epoch - (self.pretrain_epoch//4)
-            # ReinitDone = False
+            # self.Enc_eeg_subi = Enc_eeg().cuda()
+            # self.Enc_eeg_subi = nn.DataParallel(self.Enc_eeg, device_ids=[i for i in range(len(gpus))])
+            # self.Proj_eeg_subi = Proj_eeg().cuda()
+            # self.Proj_eeg_subi = nn.DataParallel(self.Proj_eeg_subi, device_ids=[i for i in range(len(gpus))])
+            # self.Proj_img_subi = Proj_img().cuda()
+            # self.Proj_img_subi = nn.DataParallel(self.Proj_img, device_ids=[i for i in range(len(gpus))])
+            
+            # cpm_Enc_eeg_subi = CheckpointManager(prefix="Enc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub{sub_i}")
+            # cpm_Enc_eeg_subi.load_checkpoint(model=self.Enc_eeg_subi,optimizer=None,epoch="best")
 
-            for e in range(self.pretrain_epoch):
-                in_epoch = time.time()
+            # cpm_Proj_eeg_subi = CheckpointManager(prefix="Proj_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub{sub_i}")
+            # cpm_Proj_eeg_subi.load_checkpoint(model=self.Proj_eeg_subi,optimizer=None,epoch="best")
 
-                self.freeze_model(self.eeg_subj_emb, train=True)
+            # cpm_Proj_img_subi = CheckpointManager(prefix="Proj_img",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub{sub_i}")
+            # cpm_Proj_img_subi.load_checkpoint(model=self.Proj_img,optimizer=None,epoch="best")
+        
+           
+            # subject J
+            # self.freeze_model(self.Enc_eeg, train=False)
+            # self.freeze_model(self.Proj_eeg, train=False)
+            # self.freeze_model(self.Proj_img, train=False)
+
+            # subject K
+            # self.freeze_model(self.Enc_eeg_subi, train=False)
+            # self.freeze_model(self.Proj_eeg_subi, train=False)
+            # self.freeze_model(self.Proj_img_subi, train=False)
+            
+
+            self.optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters(),
+                                                              self.FD_model.parameters(),
+                                                              self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
+
+            train_FD = False
+            # for cycle_i in range(self.cycles):
+
+                # if train_FD:
+                #     epochs_to_train = self.pretrain_fd_epoch
+                # else:
+                #     epochs_to_train = self.pretrain_img_epoch
+
+            for e in range(self.pretrain_img_epoch):
+                # in_epoch = time.time()
+
+                # self.freeze_model(self.FD_model, train=False)
+                # self.freeze_model(self.Enc_eeg, train=False)
+                # self.freeze_model(self.Proj_eeg, train=False)
+                # self.freeze_model(self.Proj_img, train=False)
+
+                self.freeze_model(self.FD_model, train=True)
                 self.freeze_model(self.Enc_eeg, train=True)
-
+                # self.freeze_model(self.Proj_eeg, train=True)
+                self.freeze_model(self.Proj_img, train=True)
 
                 for i, (data1,data2,data3) in enumerate(self.dataloader):
 
                     (eeg, image_features, cls_label_id) = data1
                     (eeg_2, image_features_2, cls_label_id_2) = data2  # contrastive subject
                     # (eeg_3, image_features_3, cls_label_id_3) = data3
+
+                    image_features = Variable(image_features.cuda().type(self.Tensor))
+                    image_features_2 = Variable(image_features_2.cuda().type(self.Tensor))
 
                     eegMean = torch.mean(eeg,dim=1,keepdim=True)
                     eegMean = Variable(eegMean.cuda().type(self.Tensor))
@@ -443,130 +441,98 @@ class IE():
                     labels = Variable(labels.cuda().type(self.LongTensor))
 
                     # obtain the features
-                    Lk = self.Enc_eeg(eegMean)
-                    Lj = self.Enc_eeg(eegMean2)
+                    E_j = self.Enc_eeg(eegMean)
+                    E_k = self.Enc_eeg(eegMean2)
 
-                    SEk = self.eeg_subj_emb(Lk)
-                    SEj = self.eeg_subj_emb(Lj)
+                    # get initial subject variances for each subject
+                    E_c_j, V_j, reconstructed_j = self.FD_model(E_j)
+                    E_c_k, V_k, reconstructed_k = self.FD_model(E_k)
+                    
+                    image_features = self.Proj_img(image_features)
+                    image_features_2 = self.Proj_img(image_features_2)
 
-                    # # Forward pass through the model
-                    # aligned_eeg_1 = self.EEGAlignment(eeg_featuresMean, subject1_embeddings)
-                    # aligned_eeg_2 = self.EEGAlignment(eeg_featuresMean2, subject2_embeddings)
+                    # # pass variance to cross subject and expect it to form the input like features,
+                    # # this is to make E_c as pure as Image class features
+                    # _, _, reconstructed_k_variance = self.FD_model(None, subject_variance=V_k, E_c_subject=E_c_j)
+                    # _, _, reconstructed_j_variance = self.FD_model(None, subject_variance=V_j, E_c_subject=E_c_k)
 
-                    # aligned_eeg_1 = aligned_eeg_1 / aligned_eeg_1.norm(dim=1, keepdim=True)
-                    # aligned_eeg_2 = aligned_eeg_2 / aligned_eeg_2.norm(dim=1, keepdim=True)
+                    # # cross reconstruction loss
+                    # recon_loss_j_cross = self.criterion_l2(reconstructed_k_variance, E_k)  # SV_K + EC_J
+                    # recon_loss_k_cross = self.criterion_l2(reconstructed_j_variance, E_j)  # SV_j + EC_k
+                    # recon_cross_loss =  (recon_loss_j_cross + recon_loss_k_cross)
 
-                    # subject1_embeddings = subject1_embeddings / subject1_embeddings.norm(dim=1, keepdim=True)
-                    # subject2_embeddings = subject2_embeddings / subject2_embeddings.norm(dim=1, keepdim=True)
+                    # commonality
+                    commonality_loss = self.get_contrastive_loss(E_c_j, E_c_k,labels=labels)
 
-                    # sub1_combined_features = sub1_combined_features / sub1_combined_features.norm(dim=1, keepdim=True)
-                    # sub2_combined_features = sub2_combined_features / sub2_combined_features.norm(dim=1, keepdim=True)
+                    # loss for FD model to seperaste variance
+                    ortho_loss_j = orthogonality_loss(E_c_j, V_j)
+                    ortho_loss_k = orthogonality_loss(E_c_k, V_k)
+                    overall_ortho_loss = (ortho_loss_j + ortho_loss_k)
 
-                    # positive_distance = torch.nn.functional.pairwise_distance(sub1_combined_features, sub2_combined_features)
-                    # negative_distance = torch.nn.functional.pairwise_distance(subject1_embeddings, subject2_embeddings)
+                    # recon loss
+                    recon_loss_j = self.criterion_l2(reconstructed_j, E_j)
+                    recon_loss_k = self.criterion_l2(reconstructed_k, E_k)
 
-                    # # Compute the Triplet Loss
-                    # loss = torch.mean(torch.clamp(positive_distance - negative_distance + self.margin, min=0.0))
+                    overall_recon_loss = (recon_loss_j + recon_loss_k)
 
-                    # loss = cosine_dissimilarity_loss(u=subject1_embeddings,v=subject2_embeddings)
+                    contrastive_loss_img_j = self.get_contrastive_loss(E_c_j, image_features,labels=labels)
+                    contrastive_loss_img_k = self.get_contrastive_loss(E_c_k, image_features_2,labels=labels)
+                    overall_img_loss = (contrastive_loss_img_j+contrastive_loss_img_k)/2
 
-                    # Lk = eeg_featuresMean / eeg_featuresMean.norm(dim=1, keepdim=True)
-                    # Lj = eeg_featuresMean2 / eeg_featuresMean2.norm(dim=1, keepdim=True)
-
-                    # Z =  torch.mean(torch.stack([Lk,Lj]), dim=0)
-                    # Zj =  torch.mean(torch.stack([eeg_featuresMean2,subject2_embeddings]), dim=0)
-
-                    # Zk =  torch.mean(torch.stack([Lk,SEk]), dim=0)
-                    # Zj =  torch.mean(torch.stack([Lj,SEj]), dim=0)
-
-                    # Zk =  torch.add(Lk,SEk)
-                    # Zj =  torch.add(Lj,SEj)
-
-                    # Zk = Zk / Zk.norm(dim=1, keepdim=True)
-                    # Zj = Zj / Zj.norm(dim=1, keepdim=True)
-
-                    # loss = self.get_contrastive_loss(feat1=Zk,feat2=Zj,labels=labels)
-
-                    # loss += self.get_contrastive_loss(feat1=Zk,feat2=Lk,labels=labels)
-                    # loss += self.get_contrastive_loss(feat1=Zj,feat2=Lj,labels=labels)
-
-                    # SEdk =  torch.diff(torch.stack([SEk,Lk]), dim=0)
-                    # SEdj =  torch.diff(torch.stack([SEj,Lj]), dim=0)
-
-                    # SEk = SEk / SEk.norm(dim=1, keepdim=True)
-                    # SEj = SEj / SEj.norm(dim=1, keepdim=True)
-
-                    # mu_k =  torch.mean(Lk,dim=0)
-                    # mu_j =  torch.mean(Lj,dim=0)
-                    # std_k =  torch.std(Lk,dim=0)
-                    # std_j =  torch.std(Lj,dim=0)
-
-
-                    # SEd_Mean =  torch.mean(torch.stack([Lk,Lj]), dim=0)
-
-                    SEdk_Mean =  torch.mean(Lk, dim=0)
-                    SEdj_Mean =  torch.mean(Lj, dim=0)
-
-                    # centering removing subject related info
-                    # SEdk =  Lk - SEdk_Mean
-                    # SEdj =  Lj - SEdj_Mean
-
-                    # norm
-                    Ek = Lk - SEdk_Mean
-                    Ej = Lj - SEdj_Mean
-
-                    SEjemb = Lk - Ek
-                    SEkemb = Lj - Ej
-
-                    # pairs are similar (label = 1) or dissimilar (label = 0).
-                    # labels0 = torch.zeros(eegMean.shape[0])  # used for the loss
-                    # labels0 = Variable(labels0.cuda().type(self.LongTensor))
-
-                    # labels1 = torch.arange(eegMean.shape[0])  # used for the loss
-                    # labels1 = Variable(labels1.cuda().type(self.LongTensor))
-
-                    loss = self.get_contrastive_loss(feat1=SEk,feat2=SEkemb,labels=labels)
-                    loss += self.get_contrastive_loss(feat1=SEj,feat2=SEjemb,labels=labels)
-                    loss += self.get_contrastive_loss(feat1=Ek,feat2=Ej,labels=labels)
-
-
-                    # loss = self.get_contrastive_loss(feat1=Ek,feat2=Lk,labels=labels)
-                    # loss = self.get_contrastive_loss(feat1=Ej,feat2=Lj,labels=labels)
-                    # loss += self.get_contrastive_loss(feat1=SEdk,feat2=SEdj,labels=labels0)  
-                    # loss += cosine_dissimilarity_loss(u=SEdk,v=SEdj)
-
-                    # distance = F.pairwise_distance(SEk, SEj, p=2)
-                    # loss = 0.5 * torch.mean(distance ** 2)
-
+                    loss = lambda_ortho * overall_ortho_loss + \
+                    lambda_recon * overall_recon_loss + \
+                    lambda_commonality * commonality_loss + \
+                    overall_img_loss
+                    
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
 
-                if (e + 1) % 1 == 0:
-                    if loss <=best_loss_val:
-                        best_loss_val = loss
-                        best_epoch = e + 1
-                        # torch.save(self.Enc_eeg.module.state_dict(), os.path.join(MODEL_SAVE_PATH, model_idx + 'Enc_eeg_cls.pth') )
-                        # if e>=train_subject_embeddings_after_n_epochs:
-                        #     torch.save(self.eeg_subj_emb.module.state_dict(), os.path.join(MODEL_SAVE_PATH, model_idx + 'eeg_subj_emb.pth') )
-                        # else:
-                        #     torch.save(self.Enc_eeg.module.state_dict(), os.path.join(MODEL_SAVE_PATH, model_idx + 'Enc_eeg_cls.pth') )
 
-                        # torch.save(self.EEGAlignment.module.state_dict(), os.path.join(MODEL_SAVE_PATH, model_idx + 'EEGAlignment.pth') )
-                        # torch.save(self.eeg_subj_emb.module.state_dict(), os.path.join(MODEL_SAVE_PATH, model_idx + 'eeg_subj_emb.pth') )
-                        torch.save(self.Enc_eeg.module.state_dict(), os.path.join(MODEL_SAVE_PATH, model_idx + 'Enc_eeg_cls.pth') )
+                if (e + 1) % 1 == 0:
+
+                    ortho_loss = overall_ortho_loss <=best_loss_ortho_val
+                    img_loss = overall_img_loss <=best_loss_img_val
+                    recon_loss = overall_recon_loss <=best_loss_recon_val
+
+                    if recon_loss:
+                        best_loss_recon_val = overall_recon_loss
+
+                    if img_loss:
+                        best_loss_img_val = overall_img_loss
+
+                    if ortho_loss:
+                        best_loss_ortho_val = overall_ortho_loss
+
+
+                    if ortho_loss and img_loss and recon_loss:
+
+                        best_epoch = e + 1
+
+                        cpm_FD_model.save_checkpoint(model=self.FD_model.module,optimizer=self.fd_optimizer,epoch="best")
+                        cpm_Enc_eeg.save_checkpoint(model=self.Enc_eeg,optimizer=self.fd_optimizer,epoch="best")
+                        cpm_Proj_img.save_checkpoint(model=self.Proj_img,optimizer=self.fd_optimizer,epoch="best")
+                        # cpm_Proj_eeg.save_checkpoint(model=self.Proj_eeg,optimizer=self.fd_optimizer,epoch="best")
+
 
                     print('Sub id', self.nSub, 
-                          'Cross Sub id', sub_i,
-                          'Epoch:', e,
-                          '  best epoch: %d' % best_epoch,
-                          '  loss: %.4f' % loss.detach().cpu().numpy(),
-                        )
-                    self.log_write.write('Epoch %d: loss: %.4f, \n'%(e, loss.detach().cpu().numpy()))
+                    ' CrossSub', sub_i,
+                    ' Epoch:', e,
+                    ' best epoch: %d' % best_epoch,
+                    ' loss: %.4f' % loss.detach().cpu().numpy(),
+                    ' commonality_loss: %.4f' % commonality_loss.detach().cpu().numpy(),
+                    ' img: %.4f' % overall_img_loss.detach().cpu().numpy(),  
+                    ' recon: %.4f' % overall_recon_loss.detach().cpu().numpy(),
+                    ' ortho: %.4f' % overall_ortho_loss.detach().cpu().numpy(),  
+                    # ' cycle i', cycle_i
+                    )
+
+                    # self.log_write.write('Epoch %d: loss: %.4f, \n'%(e, loss.detach().cpu().numpy()))
 
         return 0,0,0
 
-    def fine_tune(self):
+    def fine_tune(self, subjectId, runId, withFeatureDecompose=False, pretrained_subject_id=1):
+
 
         train_eeg, _, test_eeg, test_label = self.get_eeg_data()
         train_img_feature, _ = self.get_image_data() 
@@ -597,29 +563,27 @@ class IE():
         self.test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=self.batch_size_test, shuffle=False)
 
 
-        self.Enc_eeg.load_state_dict(torch.load('/home/jbhol/EEG/gits/BrainCoder/model/pretrain/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
-        # self.eeg_subj_emb.load_state_dict(torch.load('/home/jbhol/EEG/gits/BrainCoder/model/pretrain/' + model_idx + 'eeg_subj_emb.pth'), strict=False)
-        # self.EEGAlignment.load_state_dict(torch.load('/home/jbhol/EEG/gits/BrainCoder/model/pretrain/' + model_idx + 'EEGAlignment.pth'), strict=False)
 
-        self.freeze_model(self.Enc_eeg, train=False)
-        # self.freeze_model(self.eeg_subj_emb, train=False)
+        cpm_Enc_eeg = CheckpointManager(prefix="Enc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub{pretrained_subject_id}")
+        cpm_Enc_eeg.load_checkpoint(model=self.Enc_eeg, optimizer=None,epoch="best")
 
-        self.Proj_eeg = Proj_eeg().cuda()
-        self.Proj_img = Proj_img().cuda()
+        cpm_Proj_eeg = CheckpointManager(prefix="Proj_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub{pretrained_subject_id}")
+        cpm_Proj_eeg.load_checkpoint(model=self.Proj_eeg, optimizer=None,epoch="best")
+        
+        cpm_Proj_img = CheckpointManager(prefix="Proj_img",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/sub{pretrained_subject_id}")
+        cpm_Proj_img.load_checkpoint(model=self.Proj_img, optimizer=None,epoch="best")
 
-        self.Proj_eeg = nn.DataParallel(self.Proj_eeg, device_ids=[i for i in range(len(gpus))])
-        self.Proj_img = nn.DataParallel(self.Proj_img, device_ids=[i for i in range(len(gpus))])
 
         # Optimizers
-        self.ft_optimizer = torch.optim.Adam(itertools.chain(self.Proj_eeg.parameters(), self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
-
+        self.ft_optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters(),self.Proj_eeg.parameters(), self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
 
         best_loss_val = np.inf
         for e in range(self.n_epochs):
-            in_epoch = time.time()
+            # in_epoch = time.time()
 
             self.freeze_model(self.Proj_eeg, train=True)
             self.freeze_model(self.Proj_img, train=True)
+            self.freeze_model(self.Enc_eeg, train=True)
 
             # starttime_epoch = datetime.datetime.now()
 
@@ -634,29 +598,14 @@ class IE():
 
                 # Forward pass
                 eeg_features = self.Enc_eeg(eeg)
-                # subject_embeddings = self.eeg_subj_emb(eeg_features)
-
-                # SEdk =  subject_embeddings - eeg_features
-                # E = eeg_features - SEdk
-                # sub_combined_features = torch.add(eeg_features, SEdk)
-
-                # Z =  torch.mean(torch.stack([eeg_features,subject_embeddings]), dim=0)
-                # Z =  torch.add(eeg_features,subject_embeddings)
-
-                # Forward pass through the model
-                # aligned_eeg_1 = self.EEGAlignment(eeg_features, subject_embeddings)
-                # aligned_eeg_1 = aligned_eeg_1 / aligned_eeg_1.norm(dim=1, keepdim=True)
-                # sub_combined_features = torch.add(eeg_features, subject_embeddings)
-
-                mu_eeg =  torch.mean(eeg_features,dim=0)
-                # std_eeg =  torch.std(eeg_features,dim=0)
-                # centering and norm
-                E =  eeg_features - mu_eeg
-                # E = SEdk/std_eeg
 
                 # project the features to a multimodal embedding space
-                eeg_features = self.Proj_eeg(E)
+                eeg_features = self.Proj_eeg(eeg_features)
                 img_features = self.Proj_img(img_features)
+
+                if withFeatureDecompose:
+                    # seperate variance
+                    eeg_features, V = self.FD_model(eeg_features)
 
                 # normalize the features
                 eeg_features = eeg_features / eeg_features.norm(dim=1, keepdim=True)
@@ -682,7 +631,6 @@ class IE():
 
             if (e + 1) % 1 == 0:
                 self.freeze_model(self.Enc_eeg)
-                # self.freeze_model(self.eeg_subj_emb)
                 self.freeze_model(self.Proj_eeg)
                 self.freeze_model(self.Proj_img)
 
@@ -697,26 +645,7 @@ class IE():
 
                         # Forward pass
                         veeg_features = self.Enc_eeg(veeg)
-                        # vsubject_embeddings = self.eeg_subj_emb(veeg_features)
-
-                        # vSEdk =  vsubject_embeddings - veeg_features
-                        # E = veeg_features - vSEdk
-                        # vsub_combined_features = torch.add(veeg_features, vSEdk)
-
-                        # vZ =  torch.mean(torch.stack([veeg_features,vsubject_embeddings]), dim=0)
-                        # vZ =  torch.add(veeg_features,vsubject_embeddings)
-
-                        # vsub_combined_features = torch.add(veeg_features, vsubject_embeddings)
-                        # valigned_eeg_1 = self.EEGAlignment(veeg_features, vsubject_embeddings)
-                        # valigned_eeg_1 = valigned_eeg_1 / valigned_eeg_1.norm(dim=1, keepdim=True)
-
-                        vmu_eeg =  torch.mean(veeg_features,dim=0)
-                        # vstd_eeg =  torch.std(veeg_features,dim=0)
-                        # centering and norm
-                        vE =  veeg_features - vmu_eeg
-                        # vE = vSEdk/vstd_eeg
-
-                        veeg_features = self.Proj_eeg(vE)
+                        veeg_features = self.Proj_eeg(veeg_features)
                         vimg_features = self.Proj_img(vimg_features)
 
                         veeg_features = veeg_features / veeg_features.norm(dim=1, keepdim=True)
@@ -733,17 +662,22 @@ class IE():
 
                         if vloss <= best_loss_val:
                             best_loss_val = vloss
-                            best_epoch = e + 1
+                            # best_epoch = e + 1
+
+                            cpm_Enc_eeg.save_checkpoint(model=self.Enc_eeg.module,optimizer=self.ft_optimizer,epoch="best")
+                            cpm_Proj_img.save_checkpoint(model=self.Proj_img.module,optimizer=self.ft_optimizer,epoch="best")
+                            cpm_Proj_eeg.save_checkpoint(model=self.Proj_eeg.module,optimizer=self.ft_optimizer,epoch="best")
+
                             # torch.save(self.Enc_eeg.module.state_dict(), '/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Enc_eeg_cls.pth')
-                            torch.save(self.Proj_eeg.module.state_dict(), '/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Proj_eeg_cls.pth')
-                            torch.save(self.Proj_img.module.state_dict(), '/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Proj_img_cls.pth')
+                            # torch.save(self.Proj_eeg.module.state_dict(), '/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Proj_eeg_cls.pth')
+                            # torch.save(self.Proj_img.module.state_dict(), '/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Proj_img_cls.pth')
 
                 print('Epoch:', e,
                       '  Cos eeg: %.4f' % loss_eeg.detach().cpu().numpy(),
                       '  Cos img: %.4f' % loss_img.detach().cpu().numpy(),
                       '  loss val: %.4f' % vloss.detach().cpu().numpy(),
                       )
-                self.log_write.write('Epoch %d: Cos eeg: %.4f, Cos img: %.4f, loss val: %.4f\n'%(e, loss_eeg.detach().cpu().numpy(), loss_img.detach().cpu().numpy(), vloss.detach().cpu().numpy()))
+                # self.log_write.write('Epoch %d: Cos eeg: %.4f, Cos img: %.4f, loss val: %.4f\n'%(e, loss_eeg.detach().cpu().numpy(), loss_img.detach().cpu().numpy(), vloss.detach().cpu().numpy()))
         
         return 0, 0, 0
 
@@ -752,30 +686,14 @@ class IE():
         for name, param in model.named_parameters():
             param.requires_grad = train
     
-    def test(self, subject):
+    def test(self, subjectId, runId, withFeatureDecompose=False, pretrained_subject_id=1):
 
-        self.nSub = subject
+
+        self.nSub = subjectId
 
         _, _, test_eeg, test_label = self.get_eeg_data()
         # _, _ = self.get_image_data() 
         test_center = np.load(self.test_center_path + 'center_' + self.args.dnn + '.npy', allow_pickle=True)
-
-        # shuffle the training data
-        # train_shuffle = np.random.permutation(len(train_eeg))
-        # train_eeg = train_eeg[train_shuffle]
-        # train_img_feature = train_img_feature[train_shuffle]
-
-        # val_eeg = torch.from_numpy(train_eeg[:740])
-        # val_image = torch.from_numpy(train_img_feature[:740])
-
-        # train_eeg = torch.from_numpy(train_eeg[740:])
-        # train_image = torch.from_numpy(train_img_feature[740:])
-
-
-        # dataset = torch.utils.data.TensorDataset(train_eeg, train_image)
-        # self.dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=self.batch_size, shuffle=True)
-        # val_dataset = torch.utils.data.TensorDataset(val_eeg, val_image)
-        # self.val_dataloader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=self.batch_size, shuffle=False)
 
         test_eeg = torch.from_numpy(test_eeg)
         # test_img_feature = torch.from_numpy(test_img_feature)
@@ -784,16 +702,35 @@ class IE():
         test_dataset = torch.utils.data.TensorDataset(test_eeg, test_label)
         self.test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=self.batch_size_test, shuffle=False)
 
+        if withFeatureDecompose:
 
-        self.Enc_eeg.load_state_dict(torch.load('/home/jbhol/EEG/gits/BrainCoder/model/pretrain/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
-        # self.eeg_subj_emb.load_state_dict(torch.load('/home/jbhol/EEG/gits/BrainCoder/model/pretrain/' + model_idx + 'eeg_subj_emb.pth'), strict=False)
-        # self.EEGAlignment.load_state_dict(torch.load('/home/jbhol/EEG/gits/BrainCoder/model/pretrain/' + model_idx + 'EEGAlignment.pth'), strict=False)
+            self.FD_model = FeatureDecomposerV2(768, 768)
+            self.FD_model = nn.DataParallel(self.FD_model, device_ids=[i for i in range(len(gpus))])
+            cpm_FD_model = CheckpointManager(prefix="FD_model",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}/G")
+            cpm_FD_model.load_checkpoint(model=self.FD_model,optimizer=None,epoch="best")
+            self.freeze_model(self.FD_model)
 
-        self.Proj_eeg = Proj_eeg().cuda()
-        self.Proj_img = Proj_img().cuda()
+            # cpm_Enc_eeg_G = CheckpointManager(prefix="Enc_eeg_G",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/G")
+            # cpm_Proj_eeg_G = CheckpointManager(prefix="Proj_eeg_G",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/G")
+            # cpm_Proj_img_G = CheckpointManager(prefix="Proj_img_G",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId or self.runId}/G")
 
-        self.Proj_eeg = nn.DataParallel(self.Proj_eeg, device_ids=[i for i in range(len(gpus))])
-        self.Proj_img = nn.DataParallel(self.Proj_img, device_ids=[i for i in range(len(gpus))])
+            # cpm_Enc_eeg_G.load_checkpoint(model=self.Enc_eeg.module,optimizer=None,epoch="best")
+            # cpm_Proj_eeg_G.load_checkpoint(model=self.Proj_eeg.module,optimizer=None,epoch="best")
+            # cpm_Proj_img_G.load_checkpoint(model=self.Proj_img.module,optimizer=None,epoch="best")
+        
+        # else:
+            
+            cpm_Proj_eeg = CheckpointManager(prefix="Proj_eeg",
+                                         base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
+            cpm_Proj_img = CheckpointManager(prefix="Proj_img",
+                                            base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
+            cpm_Enc_eeg = CheckpointManager(prefix="Enc_eeg",
+                                            base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
+            
+            cpm_Proj_eeg.load_checkpoint(model=self.Proj_eeg.module,optimizer=None,epoch="best")
+            cpm_Proj_img.load_checkpoint(model=self.Proj_img.module,optimizer=None,epoch="best")
+            cpm_Enc_eeg.load_checkpoint(model=self.Enc_eeg.module,optimizer=None,epoch="best")
+
 
         # * test part
         all_center = self.test_center
@@ -802,21 +739,10 @@ class IE():
         top3 = 0
         top5 = 0
 
-        # self.Enc_eeg.load_state_dict(torch.load('/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
-        self.Proj_eeg.load_state_dict(torch.load('/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Proj_eeg_cls.pth'), strict=False)
-        self.Proj_img.load_state_dict(torch.load('/home/jbhol/EEG/gits/NICE-EEG/model/' + model_idx + 'Proj_img_cls.pth'), strict=False)
-
-        # self.Enc_eeg.eval()
-        # self.Proj_eeg.eval()
-        # self.Proj_img.eval()
-        # self.eeg_subj_emb.eval()
-        # self.EEGAlignment.eval()
-
         self.freeze_model(self.Proj_img)
         self.freeze_model(self.Proj_eeg)
         self.freeze_model(self.Enc_eeg)
-        # self.freeze_model(self.eeg_subj_emb)
-
+        
 
         with torch.no_grad():
             for i, (teeg, tlabel) in enumerate(self.test_dataloader):
@@ -825,26 +751,14 @@ class IE():
                 all_center = Variable(all_center.type(self.Tensor))   
 
                 teeg_features = self.Enc_eeg(teeg)
-                # tsubject_embeddings = self.eeg_subj_emb(teeg_features)
+                # tfea = self.Proj_eeg(teeg_features)
 
-                # tSEdk =  tsubject_embeddings - teeg_features
-                # E = teeg_features - tSEdk
+                if withFeatureDecompose:
+                    tfea_fc, V, recon = self.FD_model(teeg_features)
+                    # tfea = tfea - (tfea_fc + V)
+                    tfea = (tfea + tfea_fc)/2
 
-                # tsub_combined_features = torch.add(teeg_features, tSEdk)
 
-                # tsub_combined_features = torch.add(teeg_features, tsubject_embeddings)
-                # taligned_eeg_1 = self.EEGAlignment(teeg_features, tsubject_embeddings)
-                # taligned_eeg_1 = taligned_eeg_1 / taligned_eeg_1.norm(dim=1, keepdim=True)
-
-                # tZ =  torch.mean(torch.stack([teeg_features,tsubject_embeddings]), dim=0)
-                # tZ =  torch.add(teeg_features,tsubject_embeddings)
-                tmu_eeg =  torch.mean(teeg_features,dim=0)
-                # tstd_eeg =  torch.std(teeg_features,dim=0)
-                # centering and norm
-                tE =  teeg_features - tmu_eeg
-                # tE = tSEdk/tstd_eeg
-
-                tfea = self.Proj_eeg(tE)
                 tfea = tfea / tfea.norm(dim=1, keepdim=True)
                 similarity = (100.0 * tfea @ all_center.t()).softmax(dim=-1)  # no use 100?
                 _, indices = similarity.topk(5)
@@ -862,7 +776,7 @@ class IE():
         
         print('The test Top1-%.6f, Top3-%.6f, Top5-%.6f' % (top1_acc, top3_acc, top5_acc))
         # self.log_write.write('The best epoch is: %d\n' % best_epoch)
-        self.log_write.write('The test Top1-%.6f, Top3-%.6f, Top5-%.6f\n' % (top1_acc, top3_acc, top5_acc))
+        # self.log_write.write('The test Top1-%.6f, Top3-%.6f, Top5-%.6f\n' % (top1_acc, top3_acc, top5_acc))
         
         return top1_acc, top3_acc, top5_acc
 
@@ -875,6 +789,14 @@ def main():
     aver = []
     aver3 = []
     aver5 = []
+
+    # "20250122/063410/33ac8673" # trained 1,2,3
+    # run_id="20250125/110006/602ab94f"
+    # run_id="20250125/193853/df62e743"
+    # 20250126/081918/8cf47f3f
+    ## "20250126/081918/8cf47f3f" trained 2,5 subjects with 1 being cross.
+    runMan = RunManager(run_id="20250130/102012/d21bd321") 
+    runId = runMan.getRunID()
     
     for i in range(num_sub):
         if i!=num_sub-1:
@@ -893,16 +815,20 @@ def main():
         torch.cuda.manual_seed_all(seed_n)
 
         print('Subject %d' % (i+1))
-        ie = IE(args, i + 1)
+        ie = IE(args, i + 1, runId=runId)
 
-        Acc, Acc3, Acc5 = ie.train()
+        # Acc, Acc3, Acc5 = ie.pretrain()
         # print('THE BEST ACCURACY IS ' + str(Acc))
         # print("Pretraining Done")
 
-        Acc, Acc3, Acc5 = ie.fine_tune()
-        # print('THE BEST ACCURACY IS ' + str(Acc))
+        # Acc, Acc3, Acc5 = ie.fine_tune(subjectId=i+1, runId=runId) #Stage 1
+        # # print('THE BEST ACCURACY IS ' + str(Acc))
 
-        Acc, Acc3, Acc5 = ie.test(subject=i+1)
+        # Acc, Acc3, Acc5 = ie.feature_decompose(runId=runId) #Stage 2
+
+        Acc, Acc3, Acc5 = ie.test(subjectId=i+1, runId=runId, withFeatureDecompose=True, pretrained_subject_id=1)
+        # Acc, Acc3, Acc5 = ie.test(subjectId=2, runId=runId, withFeatureDecompose=True, pretrained_subject_id=1)
+
         print('THE BEST ACCURACY IS ' + str(Acc))
 
         endtime = datetime.datetime.now()
@@ -919,7 +845,7 @@ def main():
     column = np.arange(1, cal_num+1).tolist()
     column.append('ave')
     pd_all = pd.DataFrame(columns=column, data=[aver, aver3, aver5])
-    pd_all.to_csv(result_path + 'result.csv')
+    pd_all.to_csv(result_path + f'result_sub{i+1}.csv')
 
 if __name__ == "__main__":
     print(time.asctime(time.localtime(time.time())))
