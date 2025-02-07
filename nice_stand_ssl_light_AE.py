@@ -27,7 +27,7 @@ from utils.losses import cosine_dissimilarity_loss, kld_loss, SoftmaxThresholdLo
 from utils.common import CheckpointManager, RunManager
 from archs.TSConvAE import NICEEncoder, NICEDecoder
 from archs.FD import FeatureDecomposerV2, ContrastiveLoss,orthogonality_loss,reconstruction_loss
-from archs.subjectInvariant import EEGDisentangler
+from archs.subjectInvariant import EEGDisentangler, SubjectDiscriminator
 
 
 gpus = [0]
@@ -41,9 +41,9 @@ parser = argparse.ArgumentParser(description='Experiment Stimuli Recognition tes
 parser.add_argument('--dnn', default='clip', type=str)
 parser.add_argument('--model_output', default='/home/jbhol/EEG/gits/BrainCoder/model/', type=str)
 parser.add_argument('--epoch', default='200', type=int)
-parser.add_argument('--cycles', default='5', type=int)
+parser.add_argument('--cycles', default='1', type=int)
 parser.add_argument('--pretrain_fd_epoch', default='25', type=int)
-parser.add_argument('--pretrain_img_epoch', default='50', type=int)
+parser.add_argument('--pretrain_img_epoch', default='200', type=int)
 parser.add_argument('--num_sub', default=1, type=int,
                     help='number of subjects used in the experiments. ')
 parser.add_argument('-batch_size', '--batch-size', default=1024, type=int,
@@ -164,6 +164,8 @@ class IE():
         # self.cont_eeg_learner = nn.DataParallel(self.cont_eeg_learner, device_ids=[i for i in range(len(gpus))])
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        
+
         self.centers = {}
         print('initial define done.')
 
@@ -274,6 +276,10 @@ class IE():
     def feature_decompose(self, runId):
 
 
+        self.subject_discriminator = SubjectDiscriminator(features_dim=768).cuda()
+        self.subject_discriminator = nn.DataParallel(self.subject_discriminator, device_ids=[i for i in range(len(gpus))])
+
+
         self.Enc_eeg = NICEEncoder(ec_dim=768, es_dim=768).cuda()
         self.Enc_eeg = nn.DataParallel(self.Enc_eeg, device_ids=[i for i in range(len(gpus))])
         cpm_Enc_eeg = CheckpointManager(prefix="Enc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/{runId}")
@@ -298,12 +304,11 @@ class IE():
         # # cpm_Proj_img.load_checkpoint(model=self.Proj_img,optimizer=None,epoch="best")
 
         # triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-7)
-        subject_loss_fn = nn.BCEWithLogitsLoss()
-
-        cosine_loss = CosineSimilarityLoss()
+        # subject_loss_fn = nn.BCEWithLogitsLoss()
+        # cosine_loss = CosineSimilarityLoss()
 
         
-        for sub_i in range(2,4):
+        for sub_i in range(2,3):
             num = 0
             best_loss_val = np.inf
             best_loss_ortho_val = np.inf
@@ -311,12 +316,12 @@ class IE():
             best_loss_recon_val = np.inf
 
             dataset = EEG_Dataset2(args=self.args,nsub=self.args.num_sub,
-                    agument_data=True,
+                    agument_data=False,
                     load_individual_files=True,
                     subset="train",
                     include_neg_sample=False,
                     preTraning=True,
-                    cache_data=False,
+                    cache_data=True,
                     constrastive_subject=sub_i,
                     saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata")
 
@@ -326,6 +331,9 @@ class IE():
 
             self.optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters(),
                                                             self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
+
+            # self.adv_optimizer = torch.optim.Adam(itertools.chain(self.subject_discriminator.parameters()), lr=self.lr)
+        
             best_epoch = 0
 
 
@@ -334,29 +342,34 @@ class IE():
                 # self.freeze_model(self.Dec_eeg, train=True)
                 self.freeze_model(self.Enc_eeg, train=True)
                 self.freeze_model(self.Proj_img, train=True)
+                # self.freeze_model(self.subject_discriminator, train=True)
                 # self.freeze_model(self.cont_eeg_learner, train=True)
                 # self.freeze_model(self.Proj_img, train=True)
 
                 for i, (data1,data2,data3) in enumerate(self.dataloader):
 
-                    (eeg, image_features, cls_label_id) = data1
-                    (eeg_2, image_features_2, cls_label_id_2) = data2  # contrastive subject
+                    (eeg, image_features, cls_label_id, subid) = data1
+                    # (eeg_2, image_features_2, cls_label_id_2, subid2) = data2  # contrastive subject
                     # (eeg_3, image_features_3, cls_label_id_3) = data3
 
                     image_features = Variable(image_features.cuda().type(self.Tensor))
-                    image_features_2 = Variable(image_features_2.cuda().type(self.Tensor))
+                    # image_features_2 = Variable(image_features_2.cuda().type(self.Tensor))
 
                     # Subject J  out of 4 sessions get mean of first two and second two
-                    Ej1 = torch.mean(eeg[:,0:2,:,:],dim=1,keepdim=True)
-                    Ej2 = torch.mean(eeg[:,2:,:,:],dim=1,keepdim=True)
+                    # Ej1 = torch.mean(eeg[:,0:2,:,:],dim=1,keepdim=True)
+                    # Ej2 = torch.mean(eeg[:,2:,:,:],dim=1,keepdim=True)
+
+                    Ej1 = torch.mean(eeg[:,:,:,:],dim=1,keepdim=True)
                     Ej1 = Variable(Ej1.cuda().type(self.Tensor))
-                    Ej2 = Variable(Ej2.cuda().type(self.Tensor))
+                    # Ej2 = Variable(Ej2.cuda().type(self.Tensor))
 
                     # Subject K out of 4 sessions get mean of first two and second two
-                    Ek1 = torch.mean(eeg_2[:,0:2,:,:],dim=1,keepdim=True)
-                    Ek2 = torch.mean(eeg_2[:,2:,:,:],dim=1,keepdim=True)
-                    Ek1 = Variable(Ek1.cuda().type(self.Tensor))
-                    Ek2 = Variable(Ek2.cuda().type(self.Tensor))
+                    # Ek1 = torch.mean(eeg_2[:,0:2,:,:],dim=1,keepdim=True)
+                    # Ek2 = torch.mean(eeg_2[:,2:,:,:],dim=1,keepdim=True)
+
+                    # Ek1 = torch.mean(eeg_2[:,:,:,:],dim=1,keepdim=True)
+                    # Ek1 = Variable(Ek1.cuda().type(self.Tensor))
+                    # Ek2 = Variable(Ek2.cuda().type(self.Tensor))
 
                     # eegMean = torch.mean(eeg,dim=1,keepdim=True)
                     # eegMean2 = torch.mean(eeg_2,dim=1,keepdim=True)
@@ -365,48 +378,43 @@ class IE():
                     # tensor2_flat = Ek1.view(eeg.size(0), -1)
                     # cos_sim = F.cosine_similarity(tensor1_flat, tensor2_flat, dim=-1) 
 
-                    # obtain the features/ Seperate Subject variance  Ej1 and Ej2 has same subject variance of J, while Ej and Ek should be different.
-                    E_cj1, ESj1, Discj1 = self.Enc_eeg(Ej1, alpha=1)
-                    # E_cj2, ESj2, Discj2 = self.Enc_eeg(Ej2, alpha=0.1)
+                    E_cj1_backbone, E_cj1_projection = self.Enc_eeg(Ej1)
+                    # E_ck1_backbone, E_ck1_projection = self.Enc_eeg(Ek1)
 
-                    # Ek1 and Ek2 has same subject variance of subject K
-                    # E_ck1, ESk1, Disclk1 = self.Enc_eeg(Ek1, alpha=0.1)
-                    E_ck2, ESk2, Disclk2 = self.Enc_eeg(Ek2, alpha=1)
-
+                    # Discj1  = self.subject_discriminator(E_cj1_projection.detach())
+                    # Disck1  = self.subject_discriminator(E_ck1_projection.detach())
 
                     batch_size = eeg.size(0)
 
-                    s1 = torch.zeros(batch_size).cuda().type(self.LongTensor)  # Subject labels
-                    s2 = torch.ones(batch_size).cuda().type(self.LongTensor)
+                    # s1 = torch.zeros(batch_size).cuda().type(self.LongTensor)  # Subject labels
+                    # s2 = torch.ones(batch_size).cuda().type(self.LongTensor)
 
                     # Subject Classifier Prediction (Adversarial)
-                    subject_labels = torch.cat([s1.float(), s2.float()]).squeeze()  # Subject labels (S1=0, S2=1)
-                    subject_pred = torch.cat([Discj1, Disclk2])
-                    # subject_loss = F.cross_entropy(subject_pred, subject_labels)
-                    subject_loss = subject_loss_fn(subject_pred.squeeze(), subject_labels)
+                    # subject_labels = torch.cat([s1.float(), s2.float()]).squeeze()  # Subject labels (S1=0, S2=1)
+                    # subject_pred = torch.cat([Discj1, Disck1])
+                    # subject_loss = subject_loss_fn(subject_pred.squeeze(), subject_labels)
 
 
-                    image_features = self.Proj_img(image_features)
-                    image_features_2 = self.Proj_img(image_features_2)
+                    image_features = self.Proj_img(image_features) # since test doesnt use projection
+                    # image_features_2 = self.Proj_img(image_features_2)
 
-                    labels = torch.arange(eeg.shape[0]*2)  # used for the loss
+                    labels = torch.arange(eeg.shape[0])  # used for the loss
                     labels = Variable(labels.cuda().type(self.LongTensor))
 
-                    EC_cat = torch.cat([E_cj1, E_ck2])
-                    image_features_cat = torch.cat([image_features, image_features_2])
+                    img_loss = self.get_contrastive_loss(E_cj1_projection, image_features, labels)
+                    # img_val_loss = self.get_contrastive_loss(E_ck1_projection, image_features_2, labels) # This subject is not trained explicitly
 
-                    img_loss = self.get_contrastive_loss(EC_cat, image_features_cat, labels)
-                    # img_loss += self.get_contrastive_loss(E_ck2, image_features, labels)
-
-                    # latent_sim_loss = cosine_loss(E_cj1, E_ck2)
-                    # latent_mse_loss = self.criterion_l2(E_cj1,E_ck2)
-
-
+                    # subject_loss += img_loss.clone().detach()
+                    # self.adv_optimizer.zero_grad()
+                    # subject_loss.backward()
+                    # self.adv_optimizer.step()
 
                     # Total Loss: Minimize Feature Loss, Maximize Domain Confusion
-                    lambda_domain = 1
-                    loss = img_loss + (lambda_domain * subject_loss)
+                    # lambda_domain = 0.5
+                    # sub_loss = lambda_domain * subject_loss.detach().item()
+                    # loss = img_loss - sub_loss
 
+                    loss = img_loss
                     
                     self.optimizer.zero_grad()
                     loss.backward()
@@ -432,9 +440,9 @@ class IE():
                     ' best epoch: %d' % best_epoch,
                     ' Total loss: %.4f' % loss.detach().cpu().numpy(),
                     ' loss_img: %.4f' % img_loss.detach().cpu().numpy(),
-                    # ' latent_sim_loss: %.4f' % latent_mse_loss.detach().cpu().numpy(),  
-                    ' subject_loss: %.4f' % subject_loss,  
-                    # ' recon_k: %.4f' % recon_k1.detach().cpu().numpy(),  
+                    # ' img_val_loss: %.4f' % img_val_loss.detach().cpu().numpy(),  
+                    # ' subject_loss: %.4f' % subject_loss,  
+                    # ' disc alpha: %.4f' % self.subject_discriminator.module.disriminator_alpha.item(),  
                     )
 
                     # self.log_write.write('Epoch %d: loss: %.4f, \n'%(e, loss.detach().cpu().numpy()))
@@ -502,7 +510,8 @@ class IE():
                 tlabel = Variable(tlabel.type(self.LongTensor))
                 all_center = Variable(all_center.type(self.Tensor))   
 
-                teeg_features, teeg_variance, Descr = self.Enc_eeg(teeg)
+                # teeg_features, teeg_variance, Descr = self.Enc_eeg(teeg)
+                teeg_features_backbone, teeg_features_projection = self.Enc_eeg(teeg)
                 # tfea = self.Proj_eeg(teeg_features)
 
                 # Eb, B = self.cont_eeg_learner.module.model(teeg_features)
@@ -513,8 +522,7 @@ class IE():
                 # avg_loss += self.criterion_l2(teeg, recon_teeg_features)
                 # avg_loss_cnt +=1
 
-
-                tfea = teeg_features / teeg_features.norm(dim=1, keepdim=True)
+                tfea = teeg_features_projection / teeg_features_projection.norm(dim=1, keepdim=True)
                 similarity = (100.0 * tfea @ all_center.t()).softmax(dim=-1)  # no use 100?
                 _, indices = similarity.topk(5)
 

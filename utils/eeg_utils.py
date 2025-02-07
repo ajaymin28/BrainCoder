@@ -248,7 +248,7 @@ class EEG_Dataset2(Dataset):
                  preTraning=False,
                  include_neg_sample=False,
                  cache_data=False,
-                 constrastive_subject=None,
+                 constrastive_subject=0,
                  saved_data_path=None):
         assert subset=="train" or subset=="test" or subset=="val"
 
@@ -278,17 +278,6 @@ class EEG_Dataset2(Dataset):
         self.img_data_path = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
         self.test_center_path = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
 
-        if not self.load_individual_files:
-            if subset=="train" or subset=="val":
-                self.data = np.load(self.eeg_data_path + '/sub-' + format(self.nSub, '02') + '/preprocessed_eeg_training.npy', allow_pickle=True)
-                self.data = self.data['preprocessed_eeg_data']
-            else:
-                self.data = np.load(self.eeg_data_path + '/sub-' + format(self.nSub, '02') + '/preprocessed_eeg_test.npy', allow_pickle=True)
-                self.data = self.data['preprocessed_eeg_data']
-
-            # print("loaded eeg data")
-            gc.collect()
-
         ## Image Data
         self.img_parent_dir  = os.path.join(self.data_root, "Things-EEG2", 'Image_set')
         self.img_metadata = np.load(os.path.join(self.img_parent_dir, 'image_metadata.npy'), allow_pickle=True).item()
@@ -296,6 +285,10 @@ class EEG_Dataset2(Dataset):
         self.img_file_names = self.img_metadata[f'{data_key}_img_files']
         self.img_concepts = self.img_metadata[f'{data_key}_img_concepts']
 
+        #shuffle for train and val
+        index_shuffle = list(range(len(self.img_file_names)))
+        random.seed(2025)
+        random.shuffle(index_shuffle)
 
         self.data_indexes = []
         self.labels = []
@@ -306,16 +299,24 @@ class EEG_Dataset2(Dataset):
         # image features
         if not self.load_individual_files:
             if subset=="train" or subset=="val":
+                self.data = np.load(self.eeg_data_path + '/sub-' + format(self.nSub, '02') + '/preprocessed_eeg_training.npy', allow_pickle=True)
+                self.data = self.data['preprocessed_eeg_data']
+            else:
+                self.data = np.load(self.eeg_data_path + '/sub-' + format(self.nSub, '02') + '/preprocessed_eeg_test.npy', allow_pickle=True)
+                self.data = self.data['preprocessed_eeg_data']
+
+            self.data = [self.data[i] for i in index_shuffle]
+            gc.collect()
+
+            if subset=="train" or subset=="val":
                 self.img_feature = np.load(self.img_data_path + args.dnn + '_feature_maps_training.npy', allow_pickle=True) # (16540, 1, 768)
             else:
                 self.img_feature = np.load(self.img_data_path + args.dnn + '_feature_maps_test.npy', allow_pickle=True)
             self.img_feature = np.squeeze(self.img_feature) # (16540, 768)
 
+            self.img_feature = [self.img_feature[i] for i in index_shuffle]
+            gc.collect()
         
-        #shuffle for train and val
-
-        index_shuffle = list(range(len(self.img_file_names)))
-        random.shuffle(index_shuffle)
 
         # Reorder train_eeg and train_img_feature using the shuffled indices
         self.img_file_names = [self.img_file_names[i] for i in index_shuffle]
@@ -345,8 +346,22 @@ class EEG_Dataset2(Dataset):
             self.class_wise_data[cls_label].append(cls_idx)
 
 
-        self.indexes_loaded = []
+        self.indexes_loaded = {}
         self.loaded_indexes_features = {}
+
+        if str(self.nSub) not in self.indexes_loaded.keys():
+            self.indexes_loaded[str(self.nSub)] = []
+
+        if str(self.constrastive_subject) not in self.indexes_loaded.keys():
+            self.indexes_loaded[str(self.constrastive_subject)] = []
+
+        if str(self.nSub) not in self.loaded_indexes_features:
+            self.loaded_indexes_features[str(self.nSub)] = {}
+
+        if str(self.constrastive_subject) not in self.loaded_indexes_features:
+            self.loaded_indexes_features[str(self.constrastive_subject)] = {}
+
+        print(f"Dataset init done for subject : {self.nSub}")
         
 
     def __len__(self):
@@ -415,12 +430,13 @@ class EEG_Dataset2(Dataset):
         # img_dir = os.path.join(img_parent_dir, 'training_images', img_metadata[f'{self.subset}_img_concepts'][index], img_metadata[f'{self.subset}_img_files'][index])
         # img = Image.open(train_img_dir).convert('RGB')
 
-        if index in self.indexes_loaded:
-            img_feat, eeg_feat = self.loaded_indexes_features[index]
+        if index in self.indexes_loaded[str(self.nSub)]:
+            img_feat, eeg_feat = self.loaded_indexes_features[str(self.nSub)][index]
         else:
             img_feat, eeg_feat = self._load_npy(index)
-            self.indexes_loaded.append(index)
-            self.loaded_indexes_features[index] = [img_feat, eeg_feat]
+            if self.cache_data:
+                self.indexes_loaded[str(self.nSub)].append(index)
+                self.loaded_indexes_features[str(self.nSub)][index] = [img_feat, eeg_feat]
 
         cls_label_name = self.labels[index]
         cls_label_id = self.class_to_id[cls_label_name]
@@ -436,13 +452,13 @@ class EEG_Dataset2(Dataset):
             sampled_index = random.sample(class_sample_indexes,1)
             # print("Index loaded", sampled_index, class_sample_indexes)
 
-            if sampled_index[0] in self.indexes_loaded:
-                img_feat2, eeg_feat2 = self.loaded_indexes_features[sampled_index[0]]
+            if sampled_index[0] in self.indexes_loaded[str(self.constrastive_subject)]:
+                img_feat2, eeg_feat2 = self.loaded_indexes_features[str(self.constrastive_subject)][sampled_index[0]]
             else:
                 img_feat2, eeg_feat2 = self._load_npy(sampled_index[0],subject=self.constrastive_subject)
                 if self.cache_data:
-                    self.indexes_loaded.append(sampled_index[0])
-                    self.loaded_indexes_features[sampled_index[0]] = [img_feat2, eeg_feat2]
+                    self.indexes_loaded[str(self.constrastive_subject)].append(sampled_index[0])
+                    self.loaded_indexes_features[str(self.constrastive_subject)][sampled_index[0]] = [img_feat2, eeg_feat2]
 
 
             cls_label_name_2,cls_label_id_2=  self.getLabel(index=sampled_index[0])
@@ -450,7 +466,7 @@ class EEG_Dataset2(Dataset):
             # cls_label_id_2 = self.class_to_id[cls_label_name_2]
 
             if not self.include_neg_sample:
-                return (eeg_feat, img_feat, cls_label_id), (eeg_feat2, img_feat2, cls_label_id_2), ([], [], [])
+                return (eeg_feat, img_feat, cls_label_id, self.nSub), (eeg_feat2, img_feat2, cls_label_id_2, self.constrastive_subject), ([], [], [],[])
 
             # get negative pair
             classkeys = copy.deepcopy(list(self.class_wise_data.keys())) # get all classes
@@ -461,16 +477,18 @@ class EEG_Dataset2(Dataset):
             neg_sampled_index = random.sample(neg_class_sample_indexes,1)
 
             if neg_sampled_index[0] in self.indexes_loaded:
-                neg_img_feat, neg_eeg_feat = self.loaded_indexes_features[neg_sampled_index[0]]
+                neg_img_feat, neg_eeg_feat = self.loaded_indexes_features[str(self.nSub)][neg_sampled_index[0]]
             else:
                 neg_img_feat, neg_eeg_feat = self._load_npy(neg_sampled_index[0])
                 if self.cache_data:
-                    self.indexes_loaded.append(neg_sampled_index[0])
-                    self.loaded_indexes_features[neg_sampled_index[0]] = [neg_img_feat, neg_eeg_feat]
+                    self.indexes_loaded[str(self.nSub)].append(neg_sampled_index[0])
+                    self.loaded_indexes_features[str(self.nSub)][neg_sampled_index[0]] = [neg_img_feat, neg_eeg_feat]
 
             neg_cls_label_name,neg_cls_label_id=  self.getLabel(index=neg_sampled_index[0])
 
 
-            return (eeg_feat, img_feat, cls_label_id), (eeg_feat2, img_feat2, cls_label_id_2), (neg_eeg_feat, neg_img_feat, neg_cls_label_id)
+            return (eeg_feat, img_feat, cls_label_id,self.nSub),\
+            (eeg_feat2, img_feat2, cls_label_id_2,self.constrastive_subject), \
+                (neg_eeg_feat, neg_img_feat, neg_cls_label_id,self.nSub)
 
-        return (eeg_feat, img_feat, cls_label_id),([],[],[]),([],[],[])
+        return (eeg_feat, img_feat, cls_label_id,self.nSub),([],[],[],[]),([],[],[],[])

@@ -38,9 +38,10 @@ class SubjectDiscriminator(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 1)
         )
+        self.disriminator_alpha = nn.Parameter(torch.tensor(alpha), requires_grad=True)
 
-    def forward(self, x, alpha=0.1):
-        x = GradientReversal.apply(x, alpha)
+    def forward(self, x):
+        x = GradientReversal.apply(x, self.disriminator_alpha)
         return self.net(x)
 
 class SubjectInvariantModel(nn.Module):

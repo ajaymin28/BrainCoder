@@ -81,42 +81,23 @@ class NICEEncoder(nn.Module):  # Changed from Sequential to Module
         
         # self.visual_stim_attention = nn.MultiheadAttention(embed_dim=1440, num_heads=num_heads, batch_first=True)
         # self.ec_proj = nn.Linear(1440, ec_dim)  # Class features
-        self.layernorm = nn.LayerNorm(ec_dim)
+        # self.layernorm = nn.LayerNorm(ec_dim)
         # self.dropout2 = nn.Dropout(dropout)
 
-        self.eeg_proj = Proj_eeg()
-        self.discriminator = SubjectDiscriminator(features_dim=1440)
-
+        self.eeg_proj = Proj_eeg(proj_dim=ec_dim)
         self.gelu = nn.GELU()
         
 
-
-    def forward(self, x, alpha=0.5):
+    def forward(self, x):
         # Original forward path
         x = self.patch_embed(x)
         x = self.flatten(x)
         # x = self.gelu(x)
         x_eeg_proj = self.eeg_proj(x)
-        x_eeg_proj = self.layernorm(x_eeg_proj)
-
-        # # subject variance
-        # subject_attn, sub_attn_w = self.subject_attention(x,x,x)
-        # subject_x = x + self.dropout1(subject_attn)
-        # subject_proj = self.dropout1(self.es_proj(subject_x))
-        # subject_x = self.norm_subject(subject_proj)
-        subject_proj = []
-        # visual_proj= []
-
-        # visual 
-        # visual_stim_attn, visual_attn_w = self.visual_stim_attention(x,x,x)
-        # visual_x = x + self.dropout2(visual_stim_attn)
-        # visual_proj = self.dropout2(self.ec_proj(visual_x))
-        # visual_proj = self.norm_class(visual_proj)
-
-        disc_out = self.discriminator(x,alpha=alpha)
+        # x_eeg_proj = self.layernorm(x_eeg_proj)
 
         # New projections
-        return x_eeg_proj, subject_proj, disc_out
+        return x, x_eeg_proj
 # --------------------------
 # Enhanced Decoder Architecture
 # --------------------------
