@@ -1,6 +1,106 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+import torch.distributed as dist
+import numpy as np
+import os
+
+class Parameters:
+    ce_loss_weight = 0.95
+    mse_loss_weight = 0.20
+    soft_target_loss_weight = 0.05
+    alpha = 0.5
+    teacher_temp = 0.05
+    student_temp=0.1
+
+class HyperParams:
+    learning_rate=0.001
+    T=0.5
+    soft_target_loss_weight=0.25
+    ce_loss_weight=0.75
+    warmup_teacher_temp = 0.07
+    teacher_temp = 0.07
+    warmup_teacher_temp_epochs = 5
+    alpha = 0.5
+    beta = 0.5
+
+
+
+class DINOLoss(nn.Module):
+    def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
+                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
+                 center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.ncrops = ncrops
+        self.register_buffer("center", torch.zeros(1, out_dim))
+        # we apply a warm up for the teacher temperature because
+        # a too high temperature makes the training instable at the beginning
+        self.teacher_temp_schedule = np.concatenate((
+            np.linspace(warmup_teacher_temp,
+                        teacher_temp, warmup_teacher_temp_epochs),
+            np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp
+        ))
+
+
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '29501'
+
+
+        dist.init_process_group(
+            # backend="nccl",
+            backend="gloo",
+            init_method="env://",
+            world_size=1,
+            rank=0,
+        )
+
+
+    def forward(self, student_output, teacher_output, epoch):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        HyperParams.T = self.teacher_temp_schedule[epoch]
+
+        student_out = student_output / self.student_temp
+        # student_out = student_out.chunk(self.ncrops)
+
+        # teacher centering and sharpening
+        temp = self.teacher_temp_schedule[epoch]
+        teacher_out = F.softmax((teacher_output) / temp, dim=-1)
+        # teacher_out = teacher_out.detach().chunk(2)
+
+        total_loss = 0
+        loss = torch.sum(-teacher_out * F.log_softmax(student_out, dim=-1), dim=-1)
+        total_loss += loss.mean()
+
+        # total_loss = 0
+        # n_loss_terms = 0
+        # for iq, q in enumerate(teacher_out):
+        #     for v in range(len(student_out)):
+        #         if v == iq:
+        #             # we skip cases where student and teacher operate on the same view
+        #             continue
+        #         loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+        #         total_loss += loss.mean()
+        #         n_loss_terms += 1
+        # total_loss /= n_loss_terms
+
+        # self.update_center(teacher_output)
+        return total_loss, temp
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        """
+        Update center used for teacher output.
+        """
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        dist.all_reduce(batch_center)
+        batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
+
+        # ema update
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)   
 
 
 class CosineSimilarityLoss(nn.Module):
@@ -100,3 +200,15 @@ def kld_loss(p, q, epsilon=1e-7):
     # Compute KLD (log of Q is expected by F.kl_div)
     kld = F.kl_div(q.log(), p, reduction='batchmean')
     return kld.item()
+
+
+def get_contrastive_loss(feat1, feat2, labels, logit_scale):
+    feat1 = feat1 / feat1.norm(dim=1, keepdim=True)
+    feat2 = feat2 / feat2.norm(dim=1, keepdim=True)
+    logit_scale = logit_scale.exp()
+    logits_f1 = logit_scale * feat1 @ feat2.t()
+    logits_f2 = logits_f1.t()
+    l_contrastive_align_f1 = F.cross_entropy(logits_f1, labels)
+    l_contrastive_align_f2 = F.cross_entropy(logits_f2, labels)
+    loss = (l_contrastive_align_f1 + l_contrastive_align_f2) / 2
+    return loss

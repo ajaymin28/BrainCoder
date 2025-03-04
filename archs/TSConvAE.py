@@ -46,6 +46,47 @@ class ResidualAdd(nn.Module):
         x = self.fn(x, **kwargs)
         x += res
         return x
+    
+class SubjectVarianceDecoder(nn.Sequential):
+    def __init__(self, in_feature_dim, embedding=768):
+        super().__init__()
+
+        self.decoder = nn.Sequential(
+            nn.Linear(embedding, 256),
+            nn.ReLU(),
+            nn.Linear(256, in_feature_dim)
+        )
+
+    def forward(self, x_e, x_v):
+        # decoded_f = self.decoder(torch.cat([x_e,x_v], dim=-1))
+        # decoded_f = self.decoder(x_e + x_v)
+        decoded_f = self.decoder(x_e)
+        return decoded_f
+
+class SubjectVarianceEncoder(nn.Sequential):
+    def __init__(self, in_feature_dim, embedding=768):
+        super().__init__()
+
+        # Shared stimulus encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(in_feature_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embedding)
+        )
+
+        self.sub_encoder = nn.Sequential(
+            nn.Linear(in_feature_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, embedding)
+        )
+
+
+    def forward(self, x):
+        # s_embeddings = []
+        c_embeddings = self.encoder(x)
+        s_embeddings = self.sub_encoder(x)
+        return c_embeddings,s_embeddings
+
 
 class Proj_eeg(nn.Sequential):
     def __init__(self, embedding_dim=1440, proj_dim=768, drop_proj=0.5):
@@ -74,7 +115,7 @@ class NICEEncoder(nn.Module):  # Changed from Sequential to Module
         self.flatten = FlattenHead()
         
         # New projection heads
-        # self.subject_attention = nn.MultiheadAttention(embed_dim=1440, num_heads=num_heads, batch_first=Tru)
+        # self.subject_attention = nn.MultiheadAttention(embed_dim=1440, num_heads=num_heads, batch_first=True)
         # self.es_proj = nn.Linear(1440, es_dim)  # Subject features
         # self.norm_subject = nn.LayerNorm(es_dim)
         # self.dropout1 = nn.Dropout(dropout)
@@ -84,20 +125,33 @@ class NICEEncoder(nn.Module):  # Changed from Sequential to Module
         # self.layernorm = nn.LayerNorm(ec_dim)
         # self.dropout2 = nn.Dropout(dropout)
 
-        self.eeg_proj = Proj_eeg(proj_dim=ec_dim)
-        self.gelu = nn.GELU()
-        
+        # self.eeg_proj = Proj_eeg(embedding_dim=ec_dim, proj_dim=ec_dim)
+        # self.gelu = nn.GELU()
+
+        # self.subject_variance_1 = nn.Parameter(torch.rand(size=(768,)))
+        # self.subject_variance_2 = nn.Parameter(torch.rand(size=(768,)))
+        # self.subj_variance = SubjectVarianceDecoder(in_feature_dim=1440,embedding=768)
+
 
     def forward(self, x):
         # Original forward path
         x = self.patch_embed(x)
-        x = self.flatten(x)
-        # x = self.gelu(x)
-        x_eeg_proj = self.eeg_proj(x)
+        x_backbone = self.flatten(x)
+
+        # split embeddings and decode
+        # x_cls_embeddings,x_sub_embeddings,x_decoded = self.subj_variance(x_backbone)
+        # x_eeg_proj = self.eeg_proj(x_backbone)
+        return x_backbone 
+    
+        # sub_attn_variance, sub_attn_weight = self.subject_attention(x,x,x)
+        # sub_attn_variance = self.norm_subject(sub_attn_variance)
+        # sub_attn_variance = self.dropout1(sub_attn_variance)
+
+        
         # x_eeg_proj = self.layernorm(x_eeg_proj)
 
         # New projections
-        return x, x_eeg_proj
+        # return x_backbone, x_eeg_proj, torch.mean(x2_comm_proj,x_comm_proj)
 # --------------------------
 # Enhanced Decoder Architecture
 # --------------------------

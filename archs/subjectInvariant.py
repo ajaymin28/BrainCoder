@@ -31,17 +31,21 @@ class Lambda(nn.Module):
 
 
 class SubjectDiscriminator(nn.Module):
-    def __init__(self, features_dim=768,alpha=0.1):
+    def __init__(self, features_dim=768):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(features_dim, 128),
+            nn.Linear(features_dim, 768),
             nn.ReLU(),
-            nn.Linear(128, 1)
+            nn.Linear(768, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+            nn.Sigmoid()
         )
-        self.disriminator_alpha = nn.Parameter(torch.tensor(alpha), requires_grad=True)
+        # self.disriminator_alpha = nn.Parameter(torch.tensor(alpha), requires_grad=True)
+        # self.alpha = alpha
 
-    def forward(self, x):
-        x = GradientReversal.apply(x, self.disriminator_alpha)
+    def forward(self, x, alpha=1):
+        x = GradientReversal.apply(x, alpha)
         return self.net(x)
 
 class SubjectInvariantModel(nn.Module):

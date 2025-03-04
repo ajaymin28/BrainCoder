@@ -10,6 +10,43 @@ import pickle
 from tqdm import tqdm
 import copy
 
+EEG_DATA_PATH = '/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/Preprocessed_data_250Hz'
+IMG_DATA_PATH = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
+TEST_CENTER_PATH = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
+
+
+
+
+def get_eeg_data(eeg_data_path, nSub, subset=None):
+    if subset is not None:
+        assert subset=="train" or subset=="test"
+
+    def load_data(path, subj, train=True):
+        file_name = "preprocessed_eeg_training.npy"
+        if not train:
+            file_name = "preprocessed_eeg_test.npy"
+        data = np.load(path + '/sub-' + format(subj, '02') + f'/{file_name}', allow_pickle=True)
+        # train_data_original = copy.deepcopy(train_data['preprocessed_eeg_data'])
+        data = data['preprocessed_eeg_data']
+        data = np.mean(data, axis=1)
+        data = np.expand_dims(data, axis=1)
+        return data
+
+    train_data = []
+    train_label = []
+    test_data = []
+    test_label = np.arange(200)
+
+    if subset is None:
+        test_data = load_data(path=eeg_data_path,subj=nSub,train=False)
+        train_data = load_data(path=eeg_data_path,subj=nSub,train=True)
+    elif subset=="train":
+        train_data = load_data(path=eeg_data_path,subj=nSub,train=True)
+    elif subset=="test":
+        test_data = load_data(path=eeg_data_path,subj=nSub,train=False)
+
+    return train_data, train_label, test_data, test_label
+
 class EEG_Dataset(Dataset):
     """
     Code used from : # https://github.com/eeyhsong/NICE-EEG/blob/main/nice_stand.py#L194
