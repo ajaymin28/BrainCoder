@@ -1,5 +1,5 @@
 # BrainCoder
-Learning subject invaraient EEG features for visual stimuli classification and understanding.
+Learning subject invariant EEG features for visual stimuli classification and understanding.
 
 Baselines are compared with NICE-EEG. 
 
