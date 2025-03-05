@@ -8,7 +8,7 @@ from utils.eeg_utils import EEG_Dataset2, get_eeg_data
 from utils.eeg_utils import EEG_DATA_PATH,IMG_DATA_PATH,TEST_CENTER_PATH
 from utils.common import CheckpointManager, RunManager
 from archs.AE_Unet import SpatioTemporalEEGAutoencoder, EEGDataAugmentation
-from archs.nice import Proj_img
+from archs.nice import Proj_img, Proj_eeg
 from utils.losses import get_contrastive_loss
 
 
@@ -25,7 +25,7 @@ import wandb
 # highlight-next-line
 wandb.login()
 
-def test(runId,model, subject_id, dnn="clip", batch_size=8, with_img_projection=False):
+def test(runId,model, subject_id, dnn="clip", batch_size=8, with_img_projection=False, with_eeg_projection=False):
     _, _, test_eeg, test_label = get_eeg_data(eeg_data_path=EEG_DATA_PATH, nSub=subject_id, subset="test")
 
 
@@ -50,6 +50,12 @@ def test(runId,model, subject_id, dnn="clip", batch_size=8, with_img_projection=
     #     model_img_proj = model_img_proj.to(device)
     #     cpm_Proj_img.load_checkpoint(model=model_img_proj,optimizer=None,epoch="best")
 
+    if with_eeg_projection:
+        model_eeg_proj = Proj_eeg(embedding_dim=768,proj_dim=768)
+        cpm_Proj_eeg = CheckpointManager(prefix="Proj_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/grok/{runId}")
+        cpm_Proj_eeg.load_checkpoint(model=model_eeg_proj,optimizer=None,epoch="best")
+
+
 
         
 
@@ -69,6 +75,8 @@ def test(runId,model, subject_id, dnn="clip", batch_size=8, with_img_projection=
             teeg = torch.mean(teeg,dim=1,keepdim=False)
 
             _, latent = model(teeg)
+            if with_eeg_projection:
+                latent  = model_eeg_proj(latent)
             # z = model.module.encoder(teeg)
             # p_z = model.module.projection(z)
 
@@ -99,7 +107,7 @@ def test(runId,model, subject_id, dnn="clip", batch_size=8, with_img_projection=
     return top1_acc, top3_acc, top5_acc
 
 
-def train(model, dataloader, epochs=200, add_img_proj=True, runid=None, augment_eeg_data=True):
+def train(model, dataloader, epochs=200, add_img_proj=True,add_eeg_proj=True, runid=None, augment_eeg_data=True):
 
     print("Training model")
 
@@ -110,6 +118,10 @@ def train(model, dataloader, epochs=200, add_img_proj=True, runid=None, augment_
     if add_img_proj:
         model_img_proj = Proj_img(embedding_dim=768,proj_dim=768)
         trainable_params += list(model_img_proj.parameters())
+
+    if add_eeg_proj:
+        model_eeg_proj = Proj_eeg(embedding_dim=768,proj_dim=768)
+        trainable_params += list(model_eeg_proj.parameters())
 
     optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
@@ -126,6 +138,9 @@ def train(model, dataloader, epochs=200, add_img_proj=True, runid=None, augment_
     cpm_AEnc_eeg = CheckpointManager(prefix="AEnc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/grok/{runId}")
     if add_img_proj:
         cpm_Proj_img = CheckpointManager(prefix="Proj_img",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/grok/{runId}")
+    
+    if add_eeg_proj:
+        cpm_Proj_eeg = CheckpointManager(prefix="Proj_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/grok/{runId}")
 
 
     best_loss = float('inf')
@@ -158,6 +173,8 @@ def train(model, dataloader, epochs=200, add_img_proj=True, runid=None, augment_
             if augment_eeg_data:
                 x1 = augmenter.augment(eegMean).to(device).type(Tensor)
                 outputs, latent = model(x1)
+                if add_eeg_proj:
+                    latent = model_eeg_proj(latent)
                 eegMean = eegMean.to(device).type(Tensor)
             else:
                 eegMean = eegMean.to(device).type(Tensor)
@@ -212,6 +229,9 @@ def train(model, dataloader, epochs=200, add_img_proj=True, runid=None, augment_
                 if add_img_proj:
                     cpm_Proj_img.save_checkpoint(model=model_img_proj,optimizer=optimizer,epoch="best")
 
+                if add_eeg_proj:
+                    cpm_Proj_eeg.save_checkpoint(model=model_eeg_proj,optimizer=optimizer,epoch="best")
+
     print("Training model (complete)")
 
     return model
@@ -228,6 +248,7 @@ if __name__ == "__main__":
     dropout_rate = 0.3
     init_features = 32
     add_img_proj = True
+    add_eeg_proj = True
     nSub = 1
     nSub_Contrastive = 2
     Contrastive_augmentation = False
@@ -274,6 +295,7 @@ if __name__ == "__main__":
             "init_features": init_features,
             "latent_dim": latent_dim,
             "add_img_proj": str(add_img_proj),
+            "add_eeg_proj": str(add_eeg_proj),
             "nSub": nSub,
             "nSubContrastive": nSub_Contrastive if Contrastive_augmentation else "NA",
             "EEG_Augmentation": str(EEG_Augmentation)
@@ -283,10 +305,10 @@ if __name__ == "__main__":
     trained_model = train(model=model, 
                           dataloader=dataloader,
                           epochs=num_epochs,
-                          add_img_proj=False, 
+                          add_img_proj=add_img_proj, 
+                          add_eeg_proj=add_eeg_proj,
                           runid=runId, 
                           augment_eeg_data=EEG_Augmentation)
-    
-    top1_acc, top3_acc, top5_acc = test(runId=runId,model=model,subject_id=1)
+    top1_acc, top3_acc, top5_acc = test(runId=runId,model=model,subject_id=1, with_eeg_projection=add_eeg_proj)
 
     print(runId)

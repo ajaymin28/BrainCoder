@@ -285,7 +285,7 @@ def train_model():
     learning_rate = 0.001
     epochs = 50
     latent_dim = 32
-    dropout_rate = 0.1
+    dropout_rate = 0.3
     
     model = SpatioTemporalEEGAutoencoder(latent_dim=latent_dim, dropout_rate=dropout_rate)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
