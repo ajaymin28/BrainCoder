@@ -25,7 +25,7 @@ import wandb
 # highlight-next-line
 wandb.login()
 
-def test(runId, subject_id, dnn="clip", batch_size=8):
+def test(runId,model, subject_id, dnn="clip", batch_size=8, with_img_projection=False):
     _, _, test_eeg, test_label = get_eeg_data(eeg_data_path=EEG_DATA_PATH, nSub=subject_id, subset="test")
 
 
@@ -36,17 +36,22 @@ def test(runId, subject_id, dnn="clip", batch_size=8):
     test_label = torch.from_numpy(test_label)
     test_dataset = torch.utils.data.TensorDataset(test_eeg, test_label)
     test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
-
-    latent_dim = 768
-    dropout_rate = 0.1
     
-    model = SpatioTemporalEEGAutoencoder(latent_dim=latent_dim, dropout_rate=dropout_rate)
+    # model = SpatioTemporalEEGAutoencoder(latent_dim=latent_dim, dropout_rate=dropout_rate)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cpm_AEnc_eeg = CheckpointManager(prefix="AEnc_eeg",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/grok/{runId}")
     # model = nn.DataParallel(model, device_ids=[i for i in range(len(gpus))])
     model = model.to(device)
-
     cpm_AEnc_eeg.load_checkpoint(model=model,optimizer=None,epoch="best")
+
+    # if with_img_projection:
+    #     model_img_proj = Proj_img(embedding_dim=768,proj_dim=768)
+    #     cpm_Proj_img = CheckpointManager(prefix="Proj_img",base_dir=f"/home/jbhol/EEG/gits/BrainCoder/model/grok/{runId}")
+    #     model_img_proj = model_img_proj.to(device)
+    #     cpm_Proj_img.load_checkpoint(model=model_img_proj,optimizer=None,epoch="best")
+
+
+        
 
     all_center = test_center
     total = 0
@@ -90,22 +95,20 @@ def test(runId, subject_id, dnn="clip", batch_size=8):
         "top-5": top5_acc,
     })
     
+    
     return top1_acc, top3_acc, top5_acc
 
 
-def train(model, dataloader, epochs=200, add_img_proj=True):
+def train(model, dataloader, epochs=200, add_img_proj=True, runid=None, augment_eeg_data=True):
 
     print("Training model")
-
-    if add_img_proj:
-        model_img_proj = Proj_img(embedding_dim=768,proj_dim=768)
-
 
     criterion_mse = nn.MSELoss()
     logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     trainable_params = list(model.parameters()) + [logit_scale]
     if add_img_proj:
+        model_img_proj = Proj_img(embedding_dim=768,proj_dim=768)
         trainable_params += list(model_img_proj.parameters())
 
     optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=1e-5)
@@ -151,11 +154,16 @@ def train(model, dataloader, epochs=200, add_img_proj=True):
             # eegMean2 = Variable(eegMean2.cuda().type(self.Tensor))
 
             
-            x1 = augmenter.augment(eegMean).to(device).type(Tensor)
+            
+            if augment_eeg_data:
+                x1 = augmenter.augment(eegMean).to(device).type(Tensor)
+                outputs, latent = model(x1)
+                eegMean = eegMean.to(device).type(Tensor)
+            else:
+                eegMean = eegMean.to(device).type(Tensor)
+                outputs, latent = model(eegMean)
+            
             image_features = image_features.to(device).type(Tensor)
-            eegMean = eegMean.to(device).type(Tensor)
-
-            outputs, latent = model(x1)
 
             if add_img_proj:
                 image_features = model_img_proj(image_features)
@@ -193,7 +201,8 @@ def train(model, dataloader, epochs=200, add_img_proj=True):
                 "l_contrastive_align": total_img_loss.item(),
                 "loss" :total_loss.item(),
                 "logit_scale": logit_scale.item(),
-                "lr": round(optimizer.param_groups[0]["lr"],6)
+                "lr": round(optimizer.param_groups[0]["lr"],6),
+                "runid": runid
             })
             
             if total_loss.item() < best_loss:
@@ -216,21 +225,27 @@ if __name__ == "__main__":
     embedding_dim = 768  # Match your CLIP embedding size
     learning_rate = 0.02
     latent_dim = 768
-    dropout_rate = 0.5
+    dropout_rate = 0.3
+    init_features = 32
+    add_img_proj = True
+    nSub = 1
+    nSub_Contrastive = 2
+    Contrastive_augmentation = False
+    EEG_Augmentation = True
 
     class args:
         dnn = "clip"
 
     args_inst = args()
 
-    dataset = EEG_Dataset2(args=args_inst,nsub=1,
-                    agument_data=False,
+    dataset = EEG_Dataset2(args=args_inst,nsub=nSub,
+                    agument_data=Contrastive_augmentation,
                     load_individual_files=True,
                     subset="train",
                     include_neg_sample=False,
                     preTraning=True,
                     cache_data=True,
-                    constrastive_subject=2,
+                    constrastive_subject=nSub_Contrastive,
                     saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata")
 
     dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True)
@@ -240,7 +255,7 @@ if __name__ == "__main__":
     runId = runMan.getRunID()
     print(runId)
     
-    model = SpatioTemporalEEGAutoencoder(latent_dim=latent_dim, dropout_rate=dropout_rate, init_features=32)
+    model = SpatioTemporalEEGAutoencoder(latent_dim=latent_dim, dropout_rate=dropout_rate, init_features=init_features)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
@@ -252,13 +267,26 @@ if __name__ == "__main__":
         config={
             "learning_rate": learning_rate,
             "epochs": num_epochs,
-            "change": "Unet initial experiement"
+            "change": "Unet initial experiments",
+            "batch_size": batch_size,
+            "dropout_rate": dropout_rate,
+            "runId": runId,
+            "init_features": init_features,
+            "latent_dim": latent_dim,
+            "add_img_proj": str(add_img_proj),
+            "nSub": nSub,
+            "nSubContrastive": nSub_Contrastive if Contrastive_augmentation else "NA",
+            "EEG_Augmentation": str(EEG_Augmentation)
         },
     )
 
-
-
-    trained_model = train(model=model, dataloader=dataloader,epochs=num_epochs)
-    top1_acc, top3_acc, top5_acc = test(runId=runId,subject_id=1)
+    trained_model = train(model=model, 
+                          dataloader=dataloader,
+                          epochs=num_epochs,
+                          add_img_proj=False, 
+                          runid=runId, 
+                          augment_eeg_data=EEG_Augmentation)
+    
+    top1_acc, top3_acc, top5_acc = test(runId=runId,model=model,subject_id=1)
 
     print(runId)
