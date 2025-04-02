@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+# EEG Augmenter for Visual Stimuli (No specific occipital indices required upfront)
+import torch
+
 class EEGDataAugmentation:
     def __init__(self, probability=0.5, noise_level=0.01, time_shift_max=10, 
                  amplitude_scale_range=(0.9, 1.1), dropout_prob=0.1):
@@ -158,102 +162,62 @@ class TemporalResidualBlock(nn.Module):
         out = F.relu(out)
         return out
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class SpatialAttention(nn.Module):
-    def __init__(self, in_channels):
-        super(SpatialAttention, self).__init__()
-        self.query_conv = nn.Conv1d(in_channels, in_channels // 8, kernel_size=1)
-        self.key_conv = nn.Conv1d(in_channels, in_channels // 8, kernel_size=1)
-        self.value_conv = nn.Conv1d(in_channels, in_channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, x):
-        batch_size, C, T = x.size()
-        query = self.query_conv(x).view(batch_size, -1, T)
-        key = self.key_conv(x).view(batch_size, -1, T)
-        value = self.value_conv(x).view(batch_size, -1, T)
-        
-        energy = torch.bmm(query.transpose(1, 2), key)
-        attention = self.softmax(energy)
-        out = torch.bmm(value, attention.transpose(1, 2))
-        out = out.view(batch_size, C, T)
-        
-        return self.gamma * out + x
-
-class TemporalConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dilation=1, dropout_rate=0.1):
-        super(TemporalConvBlock, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=dilation, dilation=dilation)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=dilation, dilation=dilation)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        self.dropout = nn.Dropout(dropout_rate)
-        
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.dropout(out)
-        out = F.relu(self.bn2(self.conv2(out)))
-        return out
-
 class SpatioTemporalEEGAutoencoder(nn.Module):
     def __init__(self, in_channels=63, latent_dim=32, init_features=32, dropout_rate=0.1):
         super(SpatioTemporalEEGAutoencoder, self).__init__()
         
         features = init_features
         
-        # Encoder
-        self.enc1 = TemporalConvBlock(in_channels, features, dilation=1)
+        # Spatial Attention at input
+        self.spatial_att_in = SpatialAttention(in_channels)
+        
+        # Encoder with spatial and temporal modeling
+        self.enc1 = TemporalResidualBlock(in_channels, features, dilation=1)
         self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
-        self.att1 = SpatialAttention(features)
+        self.spatial_att1 = SpatialAttention(features)
         
-        self.enc2 = TemporalConvBlock(features, features * 2, dilation=2)
+        self.enc2 = TemporalResidualBlock(features, features * 2, dilation=2)
         self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        self.att2 = SpatialAttention(features * 2)
+        self.spatial_att2 = SpatialAttention(features * 2)
         
-        self.enc3 = TemporalConvBlock(features * 2, features * 4, dilation=4)
+        self.enc3 = TemporalResidualBlock(features * 2, features * 4, dilation=4)
         self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
-        self.att3 = SpatialAttention(features * 4)
+        self.spatial_att3 = SpatialAttention(features * 4)
         
-        self.enc4 = TemporalConvBlock(features * 4, features * 8, dilation=8)
+        self.enc4 = TemporalResidualBlock(features * 4, features * 8, dilation=8)
         self.pool4 = nn.MaxPool1d(kernel_size=2, stride=2)
-        self.att4 = SpatialAttention(features * 8)
         
-        # Bottleneck with latent space
-        self.bottleneck = TemporalConvBlock(features * 8, features * 16, dilation=8)
-        self.latent_in_features = features * 16 * 15  # 512 * 15 = 7680
-        self.fc_to_latent = nn.Linear(self.latent_in_features, latent_dim)
+        # Latent space
+        self.flatten = nn.Flatten()
+        self.fc_to_latent = nn.Linear(features * 8 * 15, latent_dim)
         self.fc_bn = nn.BatchNorm1d(latent_dim)
         self.fc_dropout = nn.Dropout(dropout_rate)
-        self.fc_from_latent = nn.Linear(latent_dim, self.latent_in_features)
-        self.unflatten = nn.Unflatten(1, (features * 16, 15))
         
         # Decoder
-        self.up4 = nn.ConvTranspose1d(features * 16, features * 8, kernel_size=2, stride=2)
-        self.dec4 = TemporalConvBlock(features * 16, features * 8, dilation=8)  # 256+256=512 -> 256
-        self.att_dec4 = SpatialAttention(features * 8)
+        self.fc_from_latent = nn.Linear(latent_dim, features * 8 * 15)
+        self.unflatten = nn.Unflatten(1, (features * 8, 15))
         
-        self.up3 = nn.ConvTranspose1d(features * 8, features * 4, kernel_size=2, stride=2)
-        self.dec3 = TemporalConvBlock(features * 8, features * 4, dilation=4)   # 128+128=256 -> 128
-        self.att_dec3 = SpatialAttention(features * 4)
+        self.up4 = nn.ConvTranspose1d(features * 8, features * 4, kernel_size=2, stride=2)
+        self.dec4 = TemporalResidualBlock(features * 4, features * 4, dilation=8)
+        self.spatial_att_dec4 = SpatialAttention(features * 4)
         
-        self.up2 = nn.ConvTranspose1d(features * 4, features * 2, kernel_size=2, stride=2)
-        self.dec2 = TemporalConvBlock(features * 4, features * 2, dilation=2)   # 64+64=128 -> 64
-        self.att_dec2 = SpatialAttention(features * 2)
+        self.up3 = nn.ConvTranspose1d(features * 4, features * 2, kernel_size=2, stride=2)
+        self.dec3 = TemporalResidualBlock(features * 2, features * 2, dilation=4)
+        self.spatial_att_dec3 = SpatialAttention(features * 2)
         
-        self.up1 = nn.ConvTranspose1d(features * 2, features, kernel_size=2, stride=2)
-        self.dec1 = TemporalConvBlock(features * 2, features, dilation=1)       # 32+32=64 -> 32
-        self.att_dec1 = SpatialAttention(features)
+        self.up2 = nn.ConvTranspose1d(features * 2, features, kernel_size=2, stride=2)
+        self.dec2 = TemporalResidualBlock(features, features, dilation=2)
+        self.spatial_att_dec2 = SpatialAttention(features)
         
-        self.final_conv = nn.Conv1d(features, in_channels, kernel_size=1)
+        self.up1 = nn.ConvTranspose1d(features, features, kernel_size=2, stride=2)
+        self.dec1 = TemporalResidualBlock(features, features, dilation=1)
+        
+        self.conv_final = nn.Conv1d(features, in_channels, kernel_size=1)
         
         self.apply(self._init_weights)
     
     def _init_weights(self, module):
-        if isinstance(module, (nn.Conv1d, nn.ConvTranspose1d)):
+        if isinstance(module, nn.Conv1d) or isinstance(module, nn.ConvTranspose1d):
             nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
@@ -263,71 +227,56 @@ class SpatioTemporalEEGAutoencoder(nn.Module):
                 nn.init.constant_(module.bias, 0)
     
     def encode(self, x):
-        # Encoder
-        enc1 = self.enc1(x)        # (batch, 32, 250)
-        enc1_att = self.att1(enc1)
-        pool1 = self.pool1(enc1_att)  # (batch, 32, 125)
+        x = self.spatial_att_in(x)
         
-        enc2 = self.enc2(pool1)    # (batch, 64, 125)
-        enc2_att = self.att2(enc2)
-        pool2 = self.pool2(enc2_att)  # (batch, 64, 62)
+        enc1 = self.enc1(x)
+        enc1 = self.spatial_att1(enc1)
+        pool1 = self.pool1(enc1)
         
-        enc3 = self.enc3(pool2)    # (batch, 128, 62)
-        enc3_att = self.att3(enc3)
-        pool3 = self.pool3(enc3_att)  # (batch, 128, 31)
+        enc2 = self.enc2(pool1)
+        enc2 = self.spatial_att2(enc2)
+        pool2 = self.pool2(enc2)
         
-        enc4 = self.enc4(pool3)    # (batch, 256, 31)
-        enc4_att = self.att4(enc4)
-        pool4 = self.pool4(enc4_att)  # (batch, 256, 15)
+        enc3 = self.enc3(pool2)
+        enc3 = self.spatial_att3(enc3)
+        pool3 = self.pool3(enc3)
         
-        # Bottleneck to latent
-        bottleneck = self.bottleneck(pool4)  # (batch, 512, 15)
-        flat = bottleneck.view(bottleneck.size(0), -1)  # (batch, 7680)
-        latent = self.fc_dropout(F.relu(self.fc_bn(self.fc_to_latent(flat))))  # (batch, latent_dim)
+        enc4 = self.enc4(pool3)
+        pool4 = self.pool4(enc4)
         
-        return latent, (enc1_att, enc2_att, enc3_att, enc4_att)
+        flat = self.flatten(pool4)
+        latent = self.fc_dropout(F.relu(self.fc_bn(self.fc_to_latent(flat))))
+        return latent
     
-    def decode(self, latent, enc_features):
-        enc1_att, enc2_att, enc3_att, enc4_att = enc_features
+    def decode(self, latent):
+        x = self.fc_from_latent(latent)
+        x = self.unflatten(x)
         
-        # Latent to bottleneck
-        x = self.fc_from_latent(latent)  # (batch, 7680)
-        x = self.unflatten(x)           # (batch, 512, 15)
+        up4 = self.up4(x)
+        dec4 = self.dec4(up4)
+        dec4 = self.spatial_att_dec4(dec4)
         
-        # Decoder with skip connections
-        up4 = self.up4(x)              # (batch, 256, 30)
-        up4 = torch.cat((up4, enc4_att[:, :, :30]), dim=1)  # (batch, 512, 30)
-        dec4 = self.dec4(up4)          # (batch, 256, 30)
-        dec4_att = self.att_dec4(dec4)
+        up3 = self.up3(dec4)
+        dec3 = self.dec3(up3)
+        dec3 = self.spatial_att_dec3(dec3)
         
-        up3 = self.up3(dec4_att)       # (batch, 128, 60)
-        up3 = torch.cat((up3, enc3_att[:, :, :60]), dim=1)  # (batch, 256, 60)
-        dec3 = self.dec3(up3)          # (batch, 128, 60)
-        dec3_att = self.att_dec3(dec3)
+        up2 = self.up2(dec3)
+        dec2 = self.dec2(up2)
+        dec2 = self.spatial_att_dec2(dec2)
         
-        up2 = self.up2(dec3_att)       # (batch, 64, 120)
-        up2 = torch.cat((up2, enc2_att[:, :, :120]), dim=1)  # (batch, 128, 120)
-        dec2 = self.dec2(up2)          # (batch, 64, 120)
-        dec2_att = self.att_dec2(dec2)
+        up1 = self.up1(dec2)
+        dec1 = self.dec1(up1)
         
-        up1 = self.up1(dec2_att)       # (batch, 32, 240)
-        up1 = torch.cat((up1, enc1_att[:, :, :240]), dim=1)  # (batch, 64, 240)
-        dec1 = self.dec1(up1)          # (batch, 32, 240)
-        dec1_att = self.att_dec1(dec1)
-        
-        # Pad to match input size
-        diff = 250 - dec1_att.size(2)
+        diff = 250 - dec1.size(2)
         if diff > 0:
-            dec1_att = F.pad(dec1_att, (diff//2, diff - diff//2))  # (batch, 32, 250)
-        
-        output = self.final_conv(dec1_att)  # (batch, 63, 250)
+            dec1 = F.pad(dec1, (diff//2, diff - diff//2))
+            
+        output = self.conv_final(dec1)
         return output
     
-    def forward(self, x, encoder_only=False):
-        latent, enc_features = self.encode(x)
-        if encoder_only:
-            return [], latent
-        output = self.decode(latent, enc_features)
+    def forward(self, x):
+        latent = self.encode(x)
+        output = self.decode(latent)
         return output, latent
 
 # Training code (same as before, included for completeness)

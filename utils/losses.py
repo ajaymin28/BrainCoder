@@ -24,7 +24,13 @@ class HyperParams:
     alpha = 0.5
     beta = 0.5
 
-
+def orthogonality_loss(task_features, subject_features):
+    """
+    Enforces that task-related features and subject-related features are uncorrelated.
+    """
+    # Compute dot product between task and subject features
+    loss_ortho = torch.norm(task_features.T @ subject_features, p='fro')  # Frobenius norm
+    return loss_ortho
 
 class DINOLoss(nn.Module):
     def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
@@ -201,14 +207,58 @@ def kld_loss(p, q, epsilon=1e-7):
     kld = F.kl_div(q.log(), p, reduction='batchmean')
     return kld.item()
 
+# def get_contrastive_loss(feat1, feat2, labels, logit_scale):
+#     """
+#     Compute contrastive loss for DDP training.
+    
+#     Args:
+#         feat1: First feature tensor (batch_size, embedding_dim)
+#         feat2: Second feature tensor (batch_size, embedding_dim)
+#         labels: Ground truth labels (batch_size)
+#         logit_scale: Scaling parameter for logits
+#     """
+#     # Normalize features (per-GPU operation)
+#     feat1 = F.normalize(feat1, dim=1)
+#     feat2 = F.normalize(feat2, dim=1)
+    
+#     # Exponentiate logit scale (per-GPU)
+#     logit_scale = logit_scale.exp()
+
+#     # Compute logits efficiently (per-GPU)
+#     logits_f1 = logit_scale * torch.einsum('ik,jk->ij', feat1, feat2)
+    
+#     # Compute contrastive loss for this GPU's batch
+#     loss_f1 = F.cross_entropy(logits_f1, labels)
+#     loss_f2 = F.cross_entropy(logits_f1.t(), labels)
+#     local_loss = (loss_f1 + loss_f2) / 2
+    
+#     # Reduce loss across all GPUs
+#     loss_tensor = torch.tensor(local_loss.item(), device=feat1.device)
+#     dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+#     global_loss = loss_tensor / dist.get_world_size()
+
+#     # Return local loss for backward pass, but use global loss for logging
+#     return local_loss  # local_loss is used for gradients, global_loss could be logged if needed
 
 def get_contrastive_loss(feat1, feat2, labels, logit_scale):
-    feat1 = feat1 / feat1.norm(dim=1, keepdim=True)
-    feat2 = feat2 / feat2.norm(dim=1, keepdim=True)
+    feat1 = F.normalize(feat1, dim=1)
+    feat2 = F.normalize(feat2, dim=1)
     logit_scale = logit_scale.exp()
-    logits_f1 = logit_scale * feat1 @ feat2.t()
-    logits_f2 = logits_f1.t()
-    l_contrastive_align_f1 = F.cross_entropy(logits_f1, labels)
-    l_contrastive_align_f2 = F.cross_entropy(logits_f2, labels)
-    loss = (l_contrastive_align_f1 + l_contrastive_align_f2) / 2
+    
+    # Compute logits efficiently
+    logits_f1 = logit_scale * torch.einsum('ik,jk->ij', feat1, feat2)
+    
+    # Compute contrastive loss
+    loss = (F.cross_entropy(logits_f1, labels) + F.cross_entropy(logits_f1.t(), labels)) / 2
     return loss
+
+# def get_contrastive_loss(feat1, feat2, labels, logit_scale):
+#     feat1 = feat1 / feat1.norm(dim=1, keepdim=True)
+#     feat2 = feat2 / feat2.norm(dim=1, keepdim=True)
+#     logit_scale = logit_scale.exp()
+#     logits_f1 = logit_scale * feat1 @ feat2.t()
+#     logits_f2 = logits_f1.t()
+#     l_contrastive_align_f1 = F.cross_entropy(logits_f1, labels)
+#     l_contrastive_align_f2 = F.cross_entropy(logits_f2, labels)
+#     loss = (l_contrastive_align_f1 + l_contrastive_align_f2) / 2
+#     return loss

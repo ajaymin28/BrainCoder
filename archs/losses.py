@@ -1,6 +1,5 @@
 import torch
 
-
 def recon_loss(x, x_bar):
     """
     reconstruct loss

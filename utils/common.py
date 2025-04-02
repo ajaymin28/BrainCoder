@@ -1,7 +1,74 @@
 import os
 import torch
+import torch.nn as nn
 import uuid
 from datetime import datetime
+from collections import OrderedDict
+import torch.nn.init as init
+
+class TrainConfig:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    epochs = 100
+    batch_size = 4096
+    runId = None
+
+    learning_rate = 0.002
+    discriminator_lr = 0.002
+
+    weight_decay = 1e-5
+    latent_dim = 768 # should be same as image features
+    dropout_rate = 0.1
+
+    init_features = 32
+    only_AE = False
+    add_img_proj = True
+    add_eeg_proj = False
+    use_pre_trained_encoder = False
+    
+    Contrastive_augmentation = True
+    nSub = 1
+    nSub_Contrastive = 2
+    
+    EEG_Augmentation = False
+    Total_Subjects = 2
+    MultiSubject = True
+    MultiSubject_epochs = 30
+    TestSubject = 1
+    dnn = "clip"
+
+    # adv training
+    lambda_adv = 0.1 # If adv_loss dominates, reduce lambda_adv; if task performance(image features) suffers, increase it.
+    max_lambda_adv = 0.1
+    enable_adv_training = True
+
+    #otho loss between cls feat and subj feat
+    lambda_ortho = 0.0001
+
+    alpha = 0.0
+    
+    log_test_data = True
+    Train = True
+
+    #debug
+    profile_code = False
+
+def weights_init_normal(m):
+    """
+    Code used from : # https://github.com/eeyhsong/NICE-EEG/
+    """
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1:
+        init.normal_(m.weight.data, 0.0, 0.02)
+    elif classname.find('Linear') != -1:
+        init.normal_(m.weight.data, 0.0, 0.02)
+    elif classname.find('BatchNorm') != -1:
+        init.normal_(m.weight.data, 1.0, 0.02)
+        init.constant_(m.bias.data, 0.0)
+
+def freeze_model(model, train=False):
+    for name, param in model.named_parameters():
+        param.requires_grad = train
+    return model
 
 class RunManager:
     def __init__(self, run_id=None):
@@ -45,7 +112,7 @@ class CheckpointManager:
         torch.save(checkpoint, checkpoint_path)
         # print(f"Checkpoint saved at: {checkpoint_path}")
 
-    def load_checkpoint(self, model, optimizer, epoch):
+    def load_checkpoint(self, model, optimizer, epoch, strict=True):
         """
         Load a checkpoint into the model and optimizer.
 
@@ -62,10 +129,19 @@ class CheckpointManager:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
         checkpoint = torch.load(checkpoint_path)
-        model.load_state_dict(checkpoint["model_state_dict"],strict=True)
+        
+        state_dict = checkpoint["model_state_dict"]  # Or checkpoint itself if it's just state_dict
+        # Add 'module.' prefix if necessary
+        if isinstance(model, nn.DataParallel):
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                new_state_dict[f"module.{k}"] = v
+            model.load_state_dict(new_state_dict,strict=strict)
+        else:
+            model.load_state_dict(state_dict,strict=strict)
         # if optimizer:
         #     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        print(f"Checkpoint loaded from: {checkpoint_path}")
+        # print(f"Checkpoint loaded from: {checkpoint_path}")
 
         return checkpoint["epoch"]
 
