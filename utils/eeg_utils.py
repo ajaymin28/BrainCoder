@@ -286,6 +286,7 @@ class EEG_Dataset2(Dataset):
                  cache_data=False,
                  constrastive_subject=0,
                  mean_eeg_data=False,
+                 keep_dim_after_mean=False,
                  saved_data_path=None):
         assert subset=="train" or subset=="test" or subset=="val"
 
@@ -299,6 +300,7 @@ class EEG_Dataset2(Dataset):
         self.constrastive_subject = constrastive_subject
         self.preloaded_data = False
         self.mean_eeg_data = mean_eeg_data
+        self.keep_dim_after_mean = keep_dim_after_mean
 
         self.load_individual_files = load_individual_files
         if self.load_individual_files:
@@ -409,7 +411,7 @@ class EEG_Dataset2(Dataset):
         if str(self.constrastive_subject) not in self.loaded_indexes_features:
             self.loaded_indexes_features[str(self.constrastive_subject)] = {}
 
-        print(f"Dataset init done for subject : {self.nSub}")
+        print(f"Dataset init done for subject : {self.nSub} subset: {subset}")
         
 
     def __len__(self):
@@ -565,7 +567,8 @@ class EEG_Dataset2(Dataset):
             # print(self.data[index].shape)
 
             # eeg_feat = self.data[index][random_session,:,:]
-            eeg_feat = np.mean(self.data[index],axis=0,keepdims=False) # contains 4 sessions (4,63,250)
+            
+            eeg_feat = np.mean(self.data[index],axis=0,keepdims=self.keep_dim_after_mean) # contains 4 sessions (4,63,250)
             img_feat = self.img_feature[index]
 
             if not self.agument_data:
@@ -573,7 +576,7 @@ class EEG_Dataset2(Dataset):
 
             # random_session = random.randint(0, 3)
             # eeg_feat2 = self.c_data[index][random_session,:,:]  # contains 4 sessions (4,63,250)
-            eeg_feat2 = np.mean(self.c_data[index],axis=0,keepdims=False)
+            eeg_feat2 = np.mean(self.c_data[index],axis=0,keepdims=self.keep_dim_after_mean)
 
 
             if not self.include_neg_sample:
@@ -589,7 +592,7 @@ class EEG_Dataset2(Dataset):
             neg_sampled_index = random.sample(neg_class_sample_indexes,1)[0]
             # random_session = random.randint(0, 3)
             # neg_eeg_feat = self.data[neg_sampled_index][random_session,:,:]
-            neg_eeg_feat = np.mean(self.data[neg_sampled_index],axis=0,keepdims=False)
+            neg_eeg_feat = np.mean(self.data[neg_sampled_index],axis=0,keepdims=self.keep_dim_after_mean)
 
             neg_img_feat = self.img_feature[neg_sampled_index]
             neg_cls_label_name,neg_cls_label_id=  self.getLabel(index=neg_sampled_index)

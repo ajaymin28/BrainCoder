@@ -5,12 +5,24 @@ import uuid
 from datetime import datetime
 from collections import OrderedDict
 import torch.nn.init as init
+import gc
 
 class TrainConfig:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    epochs = 100
+    local_epochs = 100 # subject data will be trained for local_epochs
+    global_epochs = 1  # subject will be repeated for global_epochs*local_epochs
+    current_epoch = 1
+    current_global_epoch = 1
+    current_subject = 1
     batch_size = 4096
+
+    train_batch_data = None
+    val_batch_data = None
+    batch_idx = 0
+    val_batch_idx = 0
     runId = None
+
+    load_pre_trained_models = False
 
     learning_rate = 0.002
     discriminator_lr = 0.002
@@ -32,7 +44,6 @@ class TrainConfig:
     EEG_Augmentation = False
     Total_Subjects = 2
     MultiSubject = True
-    MultiSubject_epochs = 30
     TestSubject = 1
     dnn = "clip"
 
@@ -51,6 +62,9 @@ class TrainConfig:
 
     #debug
     profile_code = False
+
+    keepDimAfterAvg = False
+    encoder_output_dim = 768
 
 def weights_init_normal(m):
     """
@@ -139,8 +153,8 @@ class CheckpointManager:
             model.load_state_dict(new_state_dict,strict=strict)
         else:
             model.load_state_dict(state_dict,strict=strict)
-        # if optimizer:
-        #     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if optimizer:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         # print(f"Checkpoint loaded from: {checkpoint_path}")
 
         return checkpoint["epoch"]
@@ -173,3 +187,42 @@ if __name__ == "__main__":
 
     # Load the checkpoint
     manager.load_checkpoint(model, optimizer, epoch=1)
+
+import os
+import psutil
+
+def memory_stats():
+    freeMem, total  = torch.cuda.mem_get_info()
+    process = psutil.Process(os.getpid())
+    ram_mem_perc = process.memory_percent()
+    cpu_usage = psutil.cpu_percent()
+    print(f"CPU: {cpu_usage:.2f}% RAM: {ram_mem_perc:.2f}% GPU memory Total: [{total/1024**2:.2f}] Available: [{freeMem/1024**2:.2f}] Allocated: [{torch.cuda.memory_allocated()/1024**2:.2f}] Reserved: [{torch.cuda.memory_reserved()/1024**2:.2f}]")
+memory_stats()
+
+
+def tryDel(obj_name):
+    """
+    Deletes the given object from the global space.
+    """
+    try:
+        globals()[obj_name]  # Check if the global variable exists
+        del globals()[obj_name]
+        print(f"Deleted: {obj_name}")  # Optional: Confirmation message
+    except KeyError:
+        pass
+        print(f"Object '{obj_name}' not found in the global environment.")
+    except Exception as e:
+        print(f"An error occurred while trying to delete '{obj_name}': {e}")
+
+def clean_mem(objects_to_del:list[str]):
+    """
+    Jaimin: This function helps free up CUDA memory for loading other models
+    """
+    for obj_name in objects_to_del:
+        tryDel(obj_name)
+
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except:
+        pass
