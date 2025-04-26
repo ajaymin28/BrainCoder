@@ -1,15 +1,83 @@
-# BrainCoder
-Learning subject invariant EEG features for visual stimuli classification and understanding.
+# 🧠 BrainCoder
 
-Baselines are compared with NICE-EEG. 
+**BrainCoder** is a research project focused on decoding visual stimuli from EEG (Electroencephalogram) signals.  
+The goal is to **learn generalized features** from brain activity that can accurately predict image representations across different subjects, enabling cross-subject decoding.
 
-Architectures used in experiments:
+This project explores how to align EEG signals with powerful visual-semantic embeddings like [CLIP](https://openai.com/research/clip).
 
-1. Transformers
-2. Convolutions
-3. Auto Encoders (Conv, Trans)
+---
 
-Image features:
+## 📚 Project Overview
 
-1. CLIP
-2. DinoV2 (To be added)
+- **Problem:** EEG signals are noisy and highly subject-specific, making cross-subject generalization challenging.
+- **Solution:** Train models that map EEG signals to the corresponding **CLIP image features** while minimizing subject-specific variance.
+- **Key idea:**  
+  - Learn **subject-invariant** EEG representations.
+  - Align EEG encodings with **vision-language embeddings**.
+  
+---
+
+## 🛠️ Code Structure
+
+```
+BrainCoder/
+├── configs/         # YAML config files for experiments
+├── dataset/         # EEG Dataset processing and loading
+├── archs/           # model archs to use
+├── metrics/         # Evaluation metrics
+├── models/          # EEG encoders, CLIP-based models
+├── utils/           # Utility functions (logging, checkpointing)
+├── train.py         # Entry point for training
+├── eval.py          # Entry point for evaluation
+├── requirements.txt # Required Python packages
+└── README.md        # (You're reading it!)
+```
+
+
+---
+
+## 🧠 Dataset
+
+- EEG recordings collected while subjects viewed images.
+- Each EEG signal is paired with the corresponding **CLIP image embedding**.
+- Preprocessing steps: filtering, segmentation, normalization.
+
+(*Dataset loading scripts are available in the `dataset/` folder.*)
+
+---
+
+## ✨ Features
+
+- Flexible EEG encoder architectures.
+- Subject-invariant training (domain adversarial techniques planned).
+- Contrastive learning between EEG features and image embeddings.
+- Modular and easily extensible codebase.
+
+---
+
+## 📈 TODOs
+- [ ] Update readme.md
+- [ ] Add domain adversarial training to improve cross-subject generalization.
+- [ ] Extend to zero-shot classification using CLIP text embeddings.
+- [ ] Improve visualization of EEG feature space (e.g., t-SNE plots).
+- [ ] Add pretrained model checkpoints.
+
+---
+
+## 🤝 Contributing
+
+Contributions, ideas, and discussions are welcome!  
+Feel free to open an issue or submit a pull request.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 🙌 Acknowledgements
+
+- [OpenAI CLIP](https://github.com/openai/CLIP) for image embeddings.
+- Inspiration from research on EEG-to-vision-language alignment.
