@@ -18,11 +18,12 @@ def grad_reverse(x, lambda_=1.0):
     return GradientReversalLayer.apply(x, lambda_)
 
 class SubjectDiscriminator(nn.Module):
-    def __init__(self,embed_dim=768, num_subjects=1, alpha=1.0):
+    def __init__(self,encoder,embed_dim=768, num_subjects=1, alpha=1.0):
         super(SubjectDiscriminator, self).__init__()
 
         self.alpha = alpha
         self.num_subjects = num_subjects
+        self.encoder = encoder
 
         self.feature_extractor = nn.Sequential(
             nn.Linear(embed_dim, 512),
@@ -43,14 +44,11 @@ class SubjectDiscriminator(nn.Module):
         if alpha is None: 
             alpha = self.alpha
 
+        x = self.encoder(x)
         reversed_x = grad_reverse(x, alpha)  # Apply GRL
         subject_features = self.feature_extractor(reversed_x)  # Extract subject features
         subject_pred = self.classifier(subject_features)  # Predict subject
         return subject_pred, subject_features  # Return both
-        
-        # reversed_embedding = grad_reverse(x, alpha)
-        # subject_pred = self.discriminator(reversed_embedding)
-        # return subject_pred, reversed_embedding
 
 class CNNTrans(nn.Module):
     """

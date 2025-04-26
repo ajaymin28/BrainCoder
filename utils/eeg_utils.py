@@ -502,7 +502,6 @@ class EEG_Dataset2(Dataset):
                     # img_feat2, eeg_feat2, cls_label_id_2 = self.loaded_indexes_features[str(self.constrastive_subject)][sampled_index[0]]
                 else:
                     img_feat2, eeg_feat2 = self._load_npy(sampled_index[0],subject=self.constrastive_subject)
-
                     cls_label_name_2,cls_label_id_2=  self.getLabel(index=sampled_index[0])
 
                     self.indexes_loaded[str(self.constrastive_subject)].append(sampled_index[0])
@@ -558,7 +557,6 @@ class EEG_Dataset2(Dataset):
         #         return (eeg_feat, img_feat, cls_label_id,self.nSub),([],[],[],[]),([],[],[],[])
 
         if not self.load_individual_files:
-
             cls_label_name = self.labels[index]
             cls_label_id = self.class_to_id[cls_label_name]
 

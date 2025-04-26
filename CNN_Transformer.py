@@ -215,7 +215,7 @@ def process_batch(models,
             # adv_loss1 = adv_criterion(subject_pred1.squeeze(), torch.ones(eeg.shape[0]).cuda().type(LongTensor))
             adv_loss0 = adv_criterion(subject_pred0.squeeze(), subid.cuda().type(LongTensor))
             adv_loss1 = adv_criterion(subject_pred1.squeeze(), subid2.cuda().type(LongTensor))
-            adv_loss = (adv_loss0 + adv_loss1) * config.lambda_adv
+            adv_loss = (adv_loss0 + adv_loss1) * config.alpha
 
             if not isvalidation:
                 scaler_sub.scale(adv_loss).backward(retain_graph=True)
@@ -228,8 +228,8 @@ def process_batch(models,
             scaler_sub.update()
         
         if not isvalidation:
-            if config.enable_adv_training:
-                contrastive_loss -= adv_loss
+            # if config.enable_adv_training:
+            #     contrastive_loss -= adv_loss  #TODO do i need this?
             scaler.scale(contrastive_loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -410,9 +410,9 @@ def train(models,
                     cpm_Proj_eeg.save_checkpoint(model=model_eeg_proj.module,optimizer=optimizer,epoch="best")
 
     # print("Training model (complete)")
-    optimizers = (optimizer, subject_optimizer)
+    optimizers = [optimizer, subject_optimizer]
 
-    return (model, model_img_proj, model_eeg_proj, subject_discriminator), optimizers, scheduler
+    return [model, model_img_proj, model_eeg_proj, subject_discriminator], optimizers, scheduler
 
 import torch
 import numpy as np
@@ -437,12 +437,12 @@ if __name__ == "__main__":
     # Hyperparameters
     t_config.learning_rate = 2e-3
     t_config.discriminator_lr = 1e-3
-    t_config.batch_size = 4000
+    t_config.batch_size = 16000
     t_config.local_epochs = 50
     t_config.global_epochs = 3
 
     # config
-    t_config.Train = False
+    t_config.Train = True
     t_config.log_test_data = t_config.Train
     t_config.Contrastive_augmentation = True # enables subject pair EEG 
     t_config.MultiSubject = True
@@ -460,7 +460,7 @@ if __name__ == "__main__":
     t_config.encoder_output_dim = 768  # 1440 for NICE and 768 for others
 
 
-    run_id_to_test = "20250411/085123/5c1f29d4"
+    run_id_to_test = None
 
     if t_config.Train:
         assert run_id_to_test==None
@@ -520,8 +520,8 @@ if __name__ == "__main__":
     
     # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
-    models = (model, model_img_proj, model_eeg_proj, subj_discriminator)
-    optimizers = (optimizer, sub_optimizer)
+    models = [model, model_img_proj, model_eeg_proj, subj_discriminator]
+    optimizers = [optimizer, sub_optimizer]
 
     config_dict = config_to_dict(t_config)
     config_dict["runid"] = runId
@@ -612,6 +612,9 @@ if __name__ == "__main__":
                         t_config.nSub_Contrastive = random.sample(contrastive_sub_list, 1)[0]
 
 
+                    print("before loading ds")
+                    memory_stats()
+
                     dataset = EEG_Dataset2(args=t_config,nsub=subI,
                             agument_data=t_config.Contrastive_augmentation,
                             load_individual_files=False,
@@ -645,7 +648,8 @@ if __name__ == "__main__":
                                         config=t_config)
 
                     # clean_mem(objects_to_del=["dataset", "val_dataset", "dataloader", "val_dataloader"])
-                    # del dataset, val_dataset, dataloader, val_dataloader
+                    del dataset, val_dataset, dataloader, val_dataloader
+                    print("after deleting ds")
                     memory_stats()
                     
                     gc.collect()
@@ -687,13 +691,5 @@ if __name__ == "__main__":
     # print(results)
 
     if t_config.Train:
-
-        # wandb.log({
-        #     "top-1": top1_acc,
-        #     "top-3": top3_acc,
-        #     "top-5": top5_acc,
-        # })
-
-        
         # Finish the run
         run.finish()

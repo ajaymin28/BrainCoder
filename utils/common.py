@@ -13,6 +13,7 @@ class TrainConfig:
     global_epochs = 1  # subject will be repeated for global_epochs*local_epochs
     current_epoch = 1
     current_global_epoch = 1
+    current_itr = 0
     current_subject = 1
     batch_size = 4096
 
@@ -36,6 +37,8 @@ class TrainConfig:
     add_img_proj = True
     add_eeg_proj = False
     use_pre_trained_encoder = False
+
+    model_save_base_dir = f"/home/jbhol/EEG/gits/BrainCoder/model/grok"
     
     Contrastive_augmentation = True
     nSub = 1
@@ -191,12 +194,39 @@ if __name__ == "__main__":
 import os
 import psutil
 
-def memory_stats():
-    freeMem, total  = torch.cuda.mem_get_info()
+def memory_stats(get_dict=False, print_mem_usage=True):
+    try:
+        freeMem, total  = torch.cuda.mem_get_info()
+        total = total/1024**2
+        freeMem = freeMem/1024**2
+    except:
+        freeMem = 0
+        total = 0
+
+    try:
+        cuda_allocated = torch.cuda.memory_allocated()/1024**2
+        cuda_reserved = torch.cuda.memory_reserved()/1024**2
+    except:
+        cuda_allocated = 0
+        cuda_reserved = 0
+
     process = psutil.Process(os.getpid())
     ram_mem_perc = process.memory_percent()
     cpu_usage = psutil.cpu_percent()
-    print(f"CPU: {cpu_usage:.2f}% RAM: {ram_mem_perc:.2f}% GPU memory Total: [{total/1024**2:.2f}] Available: [{freeMem/1024**2:.2f}] Allocated: [{torch.cuda.memory_allocated()/1024**2:.2f}] Reserved: [{torch.cuda.memory_reserved()/1024**2:.2f}]")
+
+    if print_mem_usage:
+        print(f"CPU: {cpu_usage:.2f}% RAM: {ram_mem_perc:.2f}% GPU memory Total: [{total:.2f}] Available: [{freeMem:.2f}] Allocated: [{cuda_allocated:.2f}] Reserved: [{cuda_reserved:.2f}]")
+
+    if get_dict:
+        return {
+            "cpu": cpu_usage,
+            "ram": ram_mem_perc,
+            "cuda_free": freeMem,
+            "cuda_total": total,
+            "cuda_allocated": round(cuda_allocated,2),
+            "cuda_reserved": round(cuda_reserved,2),
+        }
+    
 memory_stats()
 
 
