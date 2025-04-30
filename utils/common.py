@@ -7,7 +7,40 @@ from collections import OrderedDict
 import torch.nn.init as init
 import gc
 
+import os
+
+class GlobalConfig:
+    """
+    Global configuration settings for the EEG-Image project.
+    Centralizes paths and other high-level settings.
+    """
+    # --- Base Directories ---
+    # Adjust these paths based on your project structure and environment
+    PROJECT_ROOT = "D:\\Datasets\\EEG DATASET\\things2\\BrainCoder"
+    DATA_BASE_DIR = "D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG"
+    MODEL_BASE_DIR = os.path.join(PROJECT_ROOT, "model", "grok") # Base directory for saving models and checkpoints
+
+    # --- Specific File/Directory Paths ---
+    EEG_DATA_PATH = os.path.join(DATA_BASE_DIR, "Data", "Things-EEG2", "Preprocessed_data_250Hz")
+    TEST_CENTER_PATH = os.path.join(DATA_BASE_DIR, "dnn_feature")
+    IMG_DATA_PATH = os.path.join(DATA_BASE_DIR, "dnn_feature") 
+
+    # --- Wandb Settings ---
+    WANDB_PROJECT_NAME = "Experiement_Vanilla"
+    WANDB_CODE_DIR = PROJECT_ROOT # Directory containing the code to be logged
+
+    # --- Other Global Settings (optional) ---
+    # Add any other settings that are constant across different training runs
+    # e.g., default device, logging level, etc.
+    # DEVICE = "cuda" if torch.cuda.is_available() else "cpu" # Requires torch import if used here
+
+# Instantiate the global configuration
+global_config = GlobalConfig()
+
+
 class TrainConfig:
+    global_config = global_config  # Access the global config
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     local_epochs = 100 # subject data will be trained for local_epochs
     global_epochs = 1  # subject will be repeated for global_epochs*local_epochs
@@ -15,7 +48,16 @@ class TrainConfig:
     current_global_epoch = 1
     current_itr = 0
     current_subject = 1
-    batch_size = 4096
+    batch_size = 1024
+
+    channels = 63
+    time_points = 250
+    sessions = 4
+    mean_eeg_data = False # Important for VAE input shape
+    keep_dim_after_mean = False # Important for VAE input shape
+    cache_data = True # Enable memmapping
+    image_feature_dim = 768 # should be same as encoder_output_dim
+    num_subjects = 10 # Number of subjects in the dataset
 
     train_batch_data = None
     val_batch_data = None
@@ -38,7 +80,11 @@ class TrainConfig:
     add_eeg_proj = False
     use_pre_trained_encoder = False
 
-    model_save_base_dir = f"/home/jbhol/EEG/gits/BrainCoder/model/grok"
+    model_save_base_dir = global_config.MODEL_BASE_DIR
+    eeg_data_path = global_config.EEG_DATA_PATH
+    test_center_path = global_config.TEST_CENTER_PATH
+    model_base_dir = global_config.MODEL_BASE_DIR
+    data_base_dir = global_config.DATA_BASE_DIR # Used by EEG_Dataset3
     
     Contrastive_augmentation = True
     nSub = 1
@@ -66,7 +112,6 @@ class TrainConfig:
     #debug
     profile_code = False
 
-    keepDimAfterAvg = False
     encoder_output_dim = 768
 
 def weights_init_normal(m):

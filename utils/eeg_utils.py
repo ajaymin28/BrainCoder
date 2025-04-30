@@ -10,9 +10,9 @@ import pickle
 from tqdm import tqdm
 import copy
 
-EEG_DATA_PATH = '/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/Preprocessed_data_250Hz'
-IMG_DATA_PATH = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
-TEST_CENTER_PATH = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
+EEG_DATA_PATH = 'D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\Data\\Things-EEG2\\Preprocessed_data_250Hz\\'
+IMG_DATA_PATH = 'D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\dnn_feature\\'
+TEST_CENTER_PATH = 'D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\dnn_feature\\'
 
 
 
@@ -315,9 +315,9 @@ class EEG_Dataset2(Dataset):
         if self.subset=="val" or self.subset=="train":
             data_key = "train"
 
-        self.eeg_data_path = '/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/Preprocessed_data_250Hz'
-        self.img_data_path = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
-        self.test_center_path = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature/'
+        self.eeg_data_path = EEG_DATA_PATH
+        self.img_data_path = IMG_DATA_PATH
+        self.test_center_path = TEST_CENTER_PATH
 
         ## Image Data
         self.img_parent_dir  = os.path.join(self.data_root, "Things-EEG2", 'Image_set')
@@ -340,18 +340,21 @@ class EEG_Dataset2(Dataset):
         # image features
         if not self.load_individual_files:
             if subset=="train" or subset=="val":
-                self.data = np.load(self.eeg_data_path + '/sub-' + format(self.nSub, '02') + '/preprocessed_eeg_training.npy', allow_pickle=True)
+                data_path = os.path.join(self.eeg_data_path, 'sub-'+ format(self.nSub, '02') , 'preprocessed_eeg_training.npy')
+                self.data = np.load(data_path, allow_pickle=True)
                 self.data = self.data['preprocessed_eeg_data']
 
-                self.c_data = np.load(self.eeg_data_path + '/sub-' + format(self.constrastive_subject, '02') + '/preprocessed_eeg_training.npy', allow_pickle=True)
+                c_data_path = os.path.join(self.eeg_data_path, 'sub-'+ format(self.constrastive_subject, '02'), 'preprocessed_eeg_training.npy')
+                self.c_data = np.load(c_data_path, allow_pickle=True)
                 self.c_data = self.c_data['preprocessed_eeg_data']
 
-
             else:
-                self.data = np.load(self.eeg_data_path + '/sub-' + format(self.nSub, '02') + '/preprocessed_eeg_test.npy', allow_pickle=True)
+                data_path = os.path.join(self.eeg_data_path, 'sub-'+ format(self.nSub, '02'), 'preprocessed_eeg_test.npy')
+                self.data = np.load(data_path, allow_pickle=True)
                 self.data = self.data['preprocessed_eeg_data']
 
-                self.c_data = np.load(self.eeg_data_path + '/sub-' + format(self.constrastive_subject, '02') + '/preprocessed_eeg_test.npy', allow_pickle=True)
+                c_data_path = os.path.join(self.eeg_data_path, 'sub-'+ format(self.constrastive_subject, '02'), 'preprocessed_eeg_test.npy')
+                self.c_data = np.load(c_data_path, allow_pickle=True)
                 self.c_data = self.c_data['preprocessed_eeg_data']
 
             self.data = [self.data[i] for i in index_shuffle]
@@ -359,9 +362,11 @@ class EEG_Dataset2(Dataset):
             gc.collect()
 
             if subset=="train" or subset=="val":
-                self.img_feature = np.load(self.img_data_path + args.dnn + '_feature_maps_training.npy', allow_pickle=True) # (16540, 1, 768)
+                img_feature_path = os.path.join(self.img_data_path, args.dnn + '_feature_maps_training.npy')
+                self.img_feature = np.load(img_feature_path, allow_pickle=True) # (16540, 1, 768)
             else:
-                self.img_feature = np.load(self.img_data_path + args.dnn + '_feature_maps_test.npy', allow_pickle=True)
+                img_feature_path = os.path.join(self.img_data_path, args.dnn + '_feature_maps_test.npy')
+                self.img_feature = np.load(img_feature_path, allow_pickle=True)
             self.img_feature = np.squeeze(self.img_feature) # (16540, 768)
 
             self.img_feature = [self.img_feature[i] for i in index_shuffle]
@@ -385,10 +390,14 @@ class EEG_Dataset2(Dataset):
                     self.img_file_names  = self.img_file_names[:740]
                     self.img_concepts  = self.img_concepts[:740]
                     self.labels = self.labels[:740]
+                    self.data = self.data[:740]
+                    self.c_data = self.c_data[:740]
                 else:
                     self.img_file_names  = self.img_file_names[740:]
                     self.img_concepts  = self.img_concepts[740:]
                     self.labels = self.labels[740:]
+                    self.data = self.data[740:]
+                    self.c_data = self.c_data[740:]
 
         for cls_idx, cls_label in enumerate(self.labels):
             if cls_label not in self.class_wise_data.keys():
@@ -412,6 +421,7 @@ class EEG_Dataset2(Dataset):
             self.loaded_indexes_features[str(self.constrastive_subject)] = {}
 
         print(f"Dataset init done for subject : {self.nSub} subset: {subset}")
+        print("data len", len(self.data))
         
 
     def __len__(self):
@@ -564,17 +574,18 @@ class EEG_Dataset2(Dataset):
             # random_session = 3
             # print(self.data[index].shape)
 
-            # eeg_feat = self.data[index][random_session,:,:]
-            
-            eeg_feat = np.mean(self.data[index],axis=0,keepdims=self.keep_dim_after_mean) # contains 4 sessions (4,63,250)
+            eeg_feat = self.data[index]
+            if self.mean_eeg_data:
+                eeg_feat = np.mean(eeg_feat,axis=0,keepdims=self.keep_dim_after_mean) # contains 4 sessions (4,63,250)
             img_feat = self.img_feature[index]
 
             if not self.agument_data:
                 return (eeg_feat, img_feat, cls_label_id,self.nSub),([],[],[],[]),([],[],[],[])
 
             # random_session = random.randint(0, 3)
-            # eeg_feat2 = self.c_data[index][random_session,:,:]  # contains 4 sessions (4,63,250)
-            eeg_feat2 = np.mean(self.c_data[index],axis=0,keepdims=self.keep_dim_after_mean)
+            eeg_feat2 = self.c_data[index]
+            if self.mean_eeg_data:
+                eeg_feat2 = np.mean(eeg_feat2,axis=0,keepdims=self.keep_dim_after_mean)
 
 
             if not self.include_neg_sample:
@@ -589,8 +600,9 @@ class EEG_Dataset2(Dataset):
             neg_class_sample_indexes = copy.deepcopy(self.class_wise_data[sampled_class])
             neg_sampled_index = random.sample(neg_class_sample_indexes,1)[0]
             # random_session = random.randint(0, 3)
-            # neg_eeg_feat = self.data[neg_sampled_index][random_session,:,:]
-            neg_eeg_feat = np.mean(self.data[neg_sampled_index],axis=0,keepdims=self.keep_dim_after_mean)
+            neg_eeg_feat = self.data[neg_sampled_index]
+            if self.mean_eeg_data:
+                neg_eeg_feat = np.mean(neg_eeg_feat,axis=0,keepdims=self.keep_dim_after_mean)
 
             neg_img_feat = self.img_feature[neg_sampled_index]
             neg_cls_label_name,neg_cls_label_id=  self.getLabel(index=neg_sampled_index)

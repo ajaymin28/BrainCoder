@@ -180,10 +180,10 @@ def process_batch(models,
     image_features = image_features.cuda().type(Tensor)
 
     total_loss, contrastive_loss, adv_loss = None, None, None
-    scaler = GradScaler()  # Mixed precision training scaler
-    scaler_sub = GradScaler()  # Mixed precision training scaler
+    scaler = torch.amp.GradScaler()  # Mixed precision training scaler
+    scaler_sub = torch.amp.GradScaler()  # Mixed precision training scaler
 
-    with autocast():
+    with torch.amp.autocast():
 
         if not isvalidation:
             optimizer.zero_grad()
@@ -437,7 +437,7 @@ if __name__ == "__main__":
     # Hyperparameters
     t_config.learning_rate = 2e-3
     t_config.discriminator_lr = 1e-3
-    t_config.batch_size = 16000
+    t_config.batch_size = 16
     t_config.local_epochs = 50
     t_config.global_epochs = 3
 
@@ -447,10 +447,10 @@ if __name__ == "__main__":
     t_config.Contrastive_augmentation = True # enables subject pair EEG 
     t_config.MultiSubject = True
     t_config.TestSubject = 1  # this subject will be used to test and other subjects will be trained.
-    t_config.keepDimAfterAvg = False # for NICE model use true else False
+    t_config.keep_dim_after_mean = False # for NICE model use true else False
 
     # Adv training
-    t_config.enable_adv_training = True
+    t_config.enable_adv_training = False
     t_config.alpha = 1.0 #  this is scheduled accorss training steps from 0 to 1
     t_config.lambda_adv = 0.01
 
@@ -535,14 +535,15 @@ if __name__ == "__main__":
             project="Experiement_Vanilla",
             # Track hyperparameters and run metadata
             config=config_dict,
-            settings=wandb.Settings(code_dir="/home/jbhol/EEG/gits/BrainCoder")
+            # settings=wandb.Settings(code_dir="/home/jbhol/EEG/gits/BrainCoder")
         )
 
-        wandb.run.log_code("/home/jbhol/EEG/gits/BrainCoder")
+        # wandb.run.log_code("/home/jbhol/EEG/gits/BrainCoder")
 
     if t_config.Train:
         if not t_config.MultiSubject:
             dataset = EEG_Dataset2(args=t_config,nsub=1,
+                                   data_root="D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\Data",
                         agument_data=t_config.Contrastive_augmentation,
                         load_individual_files=False,
                         subset="train",
@@ -550,10 +551,11 @@ if __name__ == "__main__":
                         preTraning=False,
                         cache_data=True,
                         mean_eeg_data=True,
-                        keep_dim_after_mean=t_config.keepDimAfterAvg,
+                        keep_dim_after_mean=t_config.keep_dim_after_mean,
                         constrastive_subject=t_config.nSub_Contrastive,
                         saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata")    
             val_dataset = EEG_Dataset2(args=t_config,nsub=1,
+                                       data_root="D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\Data",
                         agument_data=t_config.Contrastive_augmentation,
                         load_individual_files=False,
                         subset="val",
@@ -561,7 +563,7 @@ if __name__ == "__main__":
                         preTraning=False,
                         cache_data=True,
                         mean_eeg_data=True,
-                        keep_dim_after_mean=t_config.keepDimAfterAvg,
+                        keep_dim_after_mean=t_config.keep_dim_after_mean,
                         constrastive_subject=t_config.nSub_Contrastive,
                         saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata")    
         
@@ -616,25 +618,27 @@ if __name__ == "__main__":
                     memory_stats()
 
                     dataset = EEG_Dataset2(args=t_config,nsub=subI,
+                                           data_root="D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\Data",
                             agument_data=t_config.Contrastive_augmentation,
                             load_individual_files=False,
                             subset="train",
                             include_neg_sample=False,
                             preTraning=False,
                             cache_data=True,
-                            mean_eeg_data=True,
-                            keep_dim_after_mean=t_config.keepDimAfterAvg,
+                            mean_eeg_data=False,
+                            keep_dim_after_mean=t_config.keep_dim_after_mean,
                             constrastive_subject=t_config.nSub_Contrastive,
                             saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata")    
                     val_dataset = EEG_Dataset2(args=t_config,nsub=subI,
+                                               data_root="D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\Data",
                                 agument_data=t_config.Contrastive_augmentation,
                                 load_individual_files=False,
                                 subset="val",
                                 include_neg_sample=False,
                                 preTraning=False,
                                 cache_data=True,
-                                mean_eeg_data=True,
-                                keep_dim_after_mean=t_config.keepDimAfterAvg,
+                                mean_eeg_data=False,
+                                keep_dim_after_mean=t_config.keep_dim_after_mean,
                                 constrastive_subject=t_config.nSub_Contrastive,
                                 saved_data_path="/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/mydata") 
             
