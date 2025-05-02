@@ -6,6 +6,8 @@ from datetime import datetime
 from collections import OrderedDict
 import torch.nn.init as init
 import gc
+from typing import List, Tuple, Dict, Any, Optional
+import numpy as np
 
 import os
 
@@ -16,8 +18,8 @@ class GlobalConfig:
     """
     # --- Base Directories ---
     # Adjust these paths based on your project structure and environment
-    PROJECT_ROOT = "D:\\Datasets\\EEG DATASET\\things2\\BrainCoder"
-    DATA_BASE_DIR = "D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG"
+    PROJECT_ROOT = "/home/jbhol/EEG/gits/BrainCoder"
+    DATA_BASE_DIR = "/home/jbhol/EEG/gits/NICE-EEG"
     MODEL_BASE_DIR = os.path.join(PROJECT_ROOT, "model", "grok") # Base directory for saving models and checkpoints
 
     # --- Specific File/Directory Paths ---
@@ -26,7 +28,7 @@ class GlobalConfig:
     IMG_DATA_PATH = os.path.join(DATA_BASE_DIR, "dnn_feature") 
 
     # --- Wandb Settings ---
-    WANDB_PROJECT_NAME = "Experiement_Vanilla"
+    WANDB_PROJECT_NAME = "Transformer_VAE"
     WANDB_CODE_DIR = PROJECT_ROOT # Directory containing the code to be logged
 
     # --- Other Global Settings (optional) ---
@@ -80,10 +82,10 @@ class TrainConfig:
     add_eeg_proj = False
     use_pre_trained_encoder = False
 
-    model_save_base_dir = global_config.MODEL_BASE_DIR
+    # Populate TrainConfig with paths from GlobalConfig
     eeg_data_path = global_config.EEG_DATA_PATH
     test_center_path = global_config.TEST_CENTER_PATH
-    model_base_dir = global_config.MODEL_BASE_DIR
+    model_save_base_dir = global_config.MODEL_BASE_DIR
     data_base_dir = global_config.DATA_BASE_DIR # Used by EEG_Dataset3
     
     Contrastive_augmentation = True
@@ -113,6 +115,19 @@ class TrainConfig:
     profile_code = False
 
     encoder_output_dim = 768
+
+import torch.distributed as dist
+# --- Distributed Training Setup (if needed) ---
+# This setup is for single-host multi-GPU. For multi-host, more complex setup is needed.
+def setup_distributed(rank: int, world_size: int) -> None:
+    """Sets up the distributed training environment."""
+    os.environ['MASTER_ADDR'] = 'localhost' # For single host
+    os.environ['MASTER_PORT'] = '12355'     # Use a free port
+    dist.init_process_group("nccl", rank=rank, world_size=world_size) # NCCL for GPU
+
+def cleanup_distributed() -> None:
+    """Cleans up the distributed training environment."""
+    dist.destroy_process_group()
 
 def weights_init_normal(m):
     """
@@ -301,3 +316,45 @@ def clean_mem(objects_to_del:list[str]):
         torch.cuda.empty_cache()
     except:
         pass
+
+
+def config_to_dict(config_class: TrainConfig) -> Dict[str, Any]:
+    """Converts a TrainConfig object to a dictionary for logging."""
+    # Convert torch.device to string for serialization
+    return {k: (v if not isinstance(v, torch.device) else str(v))
+            for k, v in vars(config_class).items() if not k.startswith("__")}
+
+def compute_alpha(config: TrainConfig, dataloader_len: int) -> float:
+    """
+    Computes the adversarial loss weight (alpha) based on training progress.
+    Uses a logistic function to schedule alpha from -1 towards 1 (or 0 to 1 if desired range).
+    The original code computes 2./(1. + np.exp(-5 * p)) - 1, which ranges from -1 to 1.
+    If alpha is used as a weight, it might be intended to range from 0 to 1.
+    Assuming the original intent is to schedule from a lower value to a higher value.
+    Let's keep the original calculation for now but add a note.
+    """
+    # Ensure current training state is tracked in the config
+    if not all([hasattr(config, 'current_global_epoch'), hasattr(config, 'current_subject'),
+                hasattr(config, 'current_epoch'), hasattr(config, 'batch_idx')]):
+        print("Warning: Training state attributes not found in config. Alpha calculation may be incorrect.")
+        return 0.0 # Return a default or raise an error
+
+    # Total steps across all global epochs, subjects, local epochs, and batches
+    total_steps = (config.global_epochs * config.Total_Subjects *
+                   config.local_epochs * dataloader_len)
+
+    # Calculate overall batch index that continuously increases
+    overall_batch_idx = (
+        (config.current_global_epoch - 1) * config.Total_Subjects * config.local_epochs * dataloader_len +
+        (config.current_subject - 1) * config.local_epochs * dataloader_len +
+        (config.current_epoch - 1) * dataloader_len +
+        (config.batch_idx - 1)
+    )
+
+    # Progress ratio (0 to 1)
+    p = float(overall_batch_idx) / total_steps
+
+    # Compute alpha using the logistic function (ranges from -1 to 1)
+    # If a 0-1 range is needed, consider 1. / (1. + np.exp(-k * p)) or similar.
+    alpha = 2. / (1. + np.exp(-5 * p)) - 1
+    return alpha

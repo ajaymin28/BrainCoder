@@ -207,38 +207,6 @@ def kld_loss(p, q, epsilon=1e-7):
     kld = F.kl_div(q.log(), p, reduction='batchmean')
     return kld.item()
 
-# def get_contrastive_loss(feat1, feat2, labels, logit_scale):
-#     """
-#     Compute contrastive loss for DDP training.
-    
-#     Args:
-#         feat1: First feature tensor (batch_size, embedding_dim)
-#         feat2: Second feature tensor (batch_size, embedding_dim)
-#         labels: Ground truth labels (batch_size)
-#         logit_scale: Scaling parameter for logits
-#     """
-#     # Normalize features (per-GPU operation)
-#     feat1 = F.normalize(feat1, dim=1)
-#     feat2 = F.normalize(feat2, dim=1)
-    
-#     # Exponentiate logit scale (per-GPU)
-#     logit_scale = logit_scale.exp()
-
-#     # Compute logits efficiently (per-GPU)
-#     logits_f1 = logit_scale * torch.einsum('ik,jk->ij', feat1, feat2)
-    
-#     # Compute contrastive loss for this GPU's batch
-#     loss_f1 = F.cross_entropy(logits_f1, labels)
-#     loss_f2 = F.cross_entropy(logits_f1.t(), labels)
-#     local_loss = (loss_f1 + loss_f2) / 2
-    
-#     # Reduce loss across all GPUs
-#     loss_tensor = torch.tensor(local_loss.item(), device=feat1.device)
-#     dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-#     global_loss = loss_tensor / dist.get_world_size()
-
-#     # Return local loss for backward pass, but use global loss for logging
-#     return local_loss  # local_loss is used for gradients, global_loss could be logged if needed
 
 def get_contrastive_loss(feat1, feat2, labels, logit_scale):
     feat1 = F.normalize(feat1, dim=1)
@@ -252,13 +220,31 @@ def get_contrastive_loss(feat1, feat2, labels, logit_scale):
     loss = (F.cross_entropy(logits_f1, labels) + F.cross_entropy(logits_f1.t(), labels)) / 2
     return loss
 
-# def get_contrastive_loss(feat1, feat2, labels, logit_scale):
-#     feat1 = feat1 / feat1.norm(dim=1, keepdim=True)
-#     feat2 = feat2 / feat2.norm(dim=1, keepdim=True)
-#     logit_scale = logit_scale.exp()
-#     logits_f1 = logit_scale * feat1 @ feat2.t()
-#     logits_f2 = logits_f1.t()
-#     l_contrastive_align_f1 = F.cross_entropy(logits_f1, labels)
-#     l_contrastive_align_f2 = F.cross_entropy(logits_f2, labels)
-#     loss = (l_contrastive_align_f1 + l_contrastive_align_f2) / 2
-#     return loss
+
+
+def vae_loss(recon_x, x, mu, logvar, projected_z, image_features, subject_logits, subject_labels, logit_scale, use_feature_confusion, beta=1.0, alpha=1.0, gamma=1.0):
+    if recon_x is not None:
+        recon_loss = F.mse_loss(recon_x, x, reduction='mean')
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    else:
+        recon_loss = torch.tensor(0.0, device=x.device)
+        kl_loss = torch.tensor(0.0, device=x.device)
+
+    proj_z_normalized = F.normalize(projected_z, dim=-1)
+    image_features_normalized = F.normalize(image_features, dim=-1)
+    logits = torch.matmul(proj_z_normalized, image_features_normalized.T) * logit_scale.exp().clamp(1, 100)
+    labels = torch.arange(proj_z_normalized.shape[0], device=proj_z_normalized.device)
+    contrastive_loss = F.cross_entropy(logits, labels)
+
+    if use_feature_confusion:
+        probs = F.softmax(subject_logits, dim=-1)
+        uniform = torch.full_like(probs, 1.0 / probs.size(1))
+        subject_loss = F.kl_div(probs.log(), uniform, reduction='batchmean')
+        subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
+        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss + gamma * subject_loss_clamped
+    else:
+        subject_loss = F.cross_entropy(subject_logits, subject_labels)
+        subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
+        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss - gamma * subject_loss_clamped
+
+    return total_loss, recon_loss, kl_loss, contrastive_loss, subject_loss_clamped

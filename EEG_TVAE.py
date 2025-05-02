@@ -4,23 +4,23 @@ import random
 import time
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import wandb # Assuming wandb is installed and configured
 from typing import List, Tuple, Dict, Any, Optional
 
 # Assuming these are custom modules
-from archs.EEGVAE import EEGVAE, vae_loss
+from archs.TEncoder import EEGTransformerVAE
 from archs.nice import Proj_eeg, Proj_img
-# Assuming SubjectDiscriminator is in archs.discriminator
 from archs.CNNTrans import SubjectDiscriminator
-from utils.common import (CheckpointManager, RunManager, TrainConfig,
+from utils.common import (CheckpointManager, RunManager, TrainConfig, config_to_dict,
                           freeze_model, memory_stats, weights_init_normal)
 # Assuming get_eeg_data is in utils.eeg_utils and uses paths passed to it
 from utils.eeg_utils import get_eeg_data
 from utils.datasets import EEG_Dataset3 # Assuming EEG_Dataset3 uses paths passed to it
-from utils.losses import get_contrastive_loss # Assuming get_contrastive_loss is implemented
+from utils.losses import vae_loss # Assuming get_contrastive_loss is implemented
+
 
 # Import the new global configuration
 from utils.common import global_config, clean_mem
@@ -37,17 +37,32 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, GPUS))
 Tensor = torch.cuda.FloatTensor
 LongTensor = torch.cuda.LongTensor
 
-# --- Distributed Training Setup (if needed) ---
-# This setup is for single-host multi-GPU. For multi-host, more complex setup is needed.
-def setup_distributed(rank: int, world_size: int) -> None:
-    """Sets up the distributed training environment."""
-    os.environ['MASTER_ADDR'] = 'localhost' # For single host
-    os.environ['MASTER_PORT'] = '12355'     # Use a free port
-    dist.init_process_group("nccl", rank=rank, world_size=world_size) # NCCL for GPU
+def vae_loss(recon_x, x, mu, logvar, projected_z, image_features, subject_logits, subject_labels, logit_scale, use_feature_confusion, beta=1.0, alpha=1.0, gamma=1.0):
+    if recon_x is not None:
+        recon_loss = F.mse_loss(recon_x, x, reduction='mean')
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    else:
+        recon_loss = torch.tensor(0.0, device=x.device)
+        kl_loss = torch.tensor(0.0, device=x.device)
 
-def cleanup_distributed() -> None:
-    """Cleans up the distributed training environment."""
-    dist.destroy_process_group()
+    proj_z_normalized = F.normalize(projected_z, dim=-1)
+    image_features_normalized = F.normalize(image_features, dim=-1)
+    logits = torch.matmul(proj_z_normalized, image_features_normalized.T) * logit_scale.exp().clamp(1, 100)
+    labels = torch.arange(proj_z_normalized.shape[0], device=proj_z_normalized.device)
+    contrastive_loss = F.cross_entropy(logits, labels)
+
+    if use_feature_confusion:
+        probs = F.softmax(subject_logits, dim=-1)
+        uniform = torch.full_like(probs, 1.0 / probs.size(1))
+        subject_loss = F.kl_div(probs.log(), uniform, reduction='batchmean')
+        subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
+        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss + gamma * subject_loss_clamped
+    else:
+        subject_loss = F.cross_entropy(subject_logits, subject_labels)
+        subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
+        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss - gamma * subject_loss_clamped
+
+    return total_loss, recon_loss, kl_loss, contrastive_loss, subject_loss_clamped
 
 # --- Helper Functions ---
 
@@ -61,55 +76,12 @@ def set_seed(seed: int = 42) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False # Can slow down training but ensures determinism
 
-def config_to_dict(config_class: TrainConfig) -> Dict[str, Any]:
-    """Converts a TrainConfig object to a dictionary for logging."""
-    # Convert torch.device to string for serialization
-    return {k: (v if not isinstance(v, torch.device) else str(v))
-            for k, v in vars(config_class).items() if not k.startswith("__")}
-
-def compute_alpha(config: TrainConfig, dataloader_len: int) -> float:
-    """
-    Computes the adversarial loss weight (alpha) based on training progress.
-    Uses a logistic function to schedule alpha from -1 towards 1 (or 0 to 1 if desired range).
-    The original code computes 2./(1. + np.exp(-5 * p)) - 1, which ranges from -1 to 1.
-    If alpha is used as a weight, it might be intended to range from 0 to 1.
-    Assuming the original intent is to schedule from a lower value to a higher value.
-    Let's keep the original calculation for now but add a note.
-    """
-    # Ensure current training state is tracked in the config
-    if not all([hasattr(config, 'current_global_epoch'), hasattr(config, 'current_subject'),
-                hasattr(config, 'current_epoch'), hasattr(config, 'batch_idx')]):
-        print("Warning: Training state attributes not found in config. Alpha calculation may be incorrect.")
-        return 0.0 # Return a default or raise an error
-
-    # Total steps across all global epochs, subjects, local epochs, and batches
-    total_steps = (config.global_epochs * config.Total_Subjects *
-                   config.local_epochs * dataloader_len)
-
-    # Calculate overall batch index that continuously increases
-    overall_batch_idx = (
-        (config.current_global_epoch - 1) * config.Total_Subjects * config.local_epochs * dataloader_len +
-        (config.current_subject - 1) * config.local_epochs * dataloader_len +
-        (config.current_epoch - 1) * dataloader_len +
-        (config.batch_idx - 1)
-    )
-
-    # Progress ratio (0 to 1)
-    p = float(overall_batch_idx) / total_steps
-
-    # Compute alpha using the logistic function (ranges from -1 to 1)
-    # If a 0-1 range is needed, consider 1. / (1. + np.exp(-k * p)) or similar.
-    alpha = 2. / (1. + np.exp(-5 * p)) - 1
-    return alpha
-
 # --- Core Training and Testing Logic ---
 
 def process_batch(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Optional[nn.Module]],
                   optimizers: Tuple[optim.Optimizer, Optional[optim.Optimizer]],
                   data,
                   config: TrainConfig,
-                  logit_scale: nn.Parameter,
-                  adv_criterion: Optional[nn.Module],
                   dataloader_len: int,
                   is_validation: bool = False) -> Tuple[float, float, Optional[float], TrainConfig, Tuple[optim.Optimizer, Optional[optim.Optimizer]]]:
     """Processes a single batch for training or validation."""
@@ -137,82 +109,60 @@ def process_batch(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Modu
 
     total_loss: Optional[torch.Tensor] = None
     contrastive_loss: Optional[torch.Tensor] = None
-    # adv_loss: Optional[torch.Tensor] = None
-
-    # Scalers for mixed precision training
-    # Initialize scalers only if not in validation mode
-    # scaler = torch.amp.GradScaler() if not is_validation else None
-    # scaler_sub = torch.amp.GradScaler() if config.enable_adv_training and not is_validation else None
-
-    # Use autocast for mixed precision
-    # with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
     
     if not is_validation:
         optimizer.zero_grad()
         if config.enable_adv_training and subject_optimizer:
             subject_optimizer.zero_grad()
 
-    # Forward pass through the EEG encoder
-    # Apply mean reduction if configured (assuming it's done here)
-    # Note: Original code applies mean *after* moving to Tensor, which might be less efficient.
-    # It's better to handle data loading/preprocessing in the dataset.
-    # Assuming `teeg = torch.mean(teeg,dim=1,keepdim=config.keepDimAfterAvg)` is needed,
-    # it should be applied to `eeg` and `eeg_2` here.
-    # Let's assume the dataset handles the initial shape, and mean is applied here if needed.
-    # The original code applied mean *after* moving to Tensor, let's keep that for now
-    # but note it could be optimized.
-
-    # eeg_processed = torch.mean(eeg, dim=1, keepdim=config.keepDimAfterAvg)
-    # output0 = model(eeg_processed)
-
     if torch.isnan(eeg).any():
         raise ValueError("NaN detected in eeg tensor")
     with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
-        recon_output, mu_output, logvar_output, z_output, subject_logits_output, projected_z_output  = model(eeg)
 
-        # output1 = None
-        # if config.Contrastive_augmentation and eeg_2 is not None:
-        #     #  eeg_2_processed = torch.mean(eeg_2, dim=1, keepdim=config.keepDimAfterAvg)
-        #     #  output1 = model(eeg_2_processed)
-        #     recon_output1, mu_output1, logvar_output1, z_output1, subject_logits_output1, projected_z_output1  = model(eeg_2)
+        recon, mu, logvar, z, subj_logits, proj, logit_scale, use_feature_confusion = model(eeg)
 
         # Apply projection layers if configured
         if config.add_img_proj and model_img_proj:
             image_features = model_img_proj(image_features)
         if config.add_eeg_proj and model_eeg_proj:
-            projected_z_output = model_eeg_proj(projected_z_output)
+            proj = model_eeg_proj(proj)
         
         total_loss, recon_loss, kl_loss, contrastive_loss, subject_loss = vae_loss(
-            model,
-            recon_output,
+            recon,
             eeg, # Original input x
-            mu_output, # mu_averaged_for_heads from model.forward
-            logvar_output, # logvar_averaged_for_heads from model.forward
-            z_output, # z_session_specific from model.forward
-            subject_logits_output, # subject_logits from model.forward
-            projected_z_output, # projected_z from model.forward
+            mu, # mu_averaged_for_heads from model.forward
+            logvar, # logvar_averaged_for_heads from model.forward
+            proj, # z_session_specific from model.forward
             image_features, # You would need to provide these
+            subj_logits, # subject_logits from model.forward
             subid_gpu, # You would need to provide these
-            alpha=0.2, #  KL divergence loss W.
-            beta=1.0, # contrastive loss W.
-            gamma=0.01   # sub loss W.
+            logit_scale, # You would need to provide these
+            use_feature_confusion
         )
 
         if not is_validation:
             if not torch.isnan(total_loss).any():
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=1.0)                  
                 optimizer.step()
 
         data_dump = {
             "data": data,
-            "model_outputs": [recon_output, mu_output, logvar_output, z_output, subject_logits_output, projected_z_output]
+            "model_outputs": [recon, mu, logvar, z, subj_logits, recon, mu, logvar, z, subj_logits, proj, logit_scale, use_feature_confusion]
         }
         if torch.isnan(total_loss).any():
-            print("NaN detected in loss")
+            print(f"NaN detected in loss: {total_loss}")
+
+            print(f"Recon: {recon_loss.item():.4f}")
+            print(f"KL: {kl_loss.item():.4f}")
+            print(f"Contrastive: {contrastive_loss.item():.4f}")
+            print(f"Subject: {subject_loss.item():.4f}")
+            print(f"Batch Loss: {total_loss.item():.4f}")
+
             # Save the tensor to a file
-            # torch.save(data_dump, '/home/jbhol/EEG/gits/BrainCoder/eeg_data_dump.pt')
-            # raise ValueError("NaN detected in loss")
+            if not os.path.exists('/home/jbhol/EEG/gits/BrainCoder/eeg_data_dump_NAN.pt'):
+                torch.save(data_dump, '/home/jbhol/EEG/gits/BrainCoder/eeg_data_dump_NAN.pt')
         else:
             if not os.path.exists('/home/jbhol/EEG/gits/BrainCoder/eeg_data_dump_good.pt'):
                 torch.save(data_dump, '/home/jbhol/EEG/gits/BrainCoder/eeg_data_dump_good.pt')
@@ -222,11 +172,7 @@ def process_batch(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Modu
               f"KL: {kl_loss.item():.4f}, Contrastive: {contrastive_loss.item():.4f}, "
               f"Subject: {subject_loss.item():.4f}")
     
-        # print(f"Recon: {recon_loss.item():.4f}")
-        # print(f"KL: {kl_loss.item():.4f}")
-        # print(f"Contrastive: {contrastive_loss.item():.4f}")
-        # print(f"Subject: {subject_loss.item():.4f}")
-        # print(f"Batch Loss: {total_loss.item():.4f}")
+        
 
         
         
@@ -237,6 +183,7 @@ def process_batch(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Modu
             recon_loss.item() if recon_loss is not None else 0.0,
             kl_loss.item() if kl_loss is not None else 0.0,
             subject_loss.item() if subject_loss is not None else 0.0,
+            logit_scale,
             config,
             optimizers)
 
@@ -256,7 +203,7 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
     dataloader, val_dataloader = dataloaders
 
     # Initialize logit scale parameter for contrastive loss
-    logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda() # Ensure logit_scale is on GPU
+    # logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda() # Ensure logit_scale is on GPU
 
     # Criterion for adversarial training
     adv_criterion = nn.CrossEntropyLoss() if config.enable_adv_training else None
@@ -314,10 +261,10 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
             # config.train_batch_data = batch_data # Pass batch data via config
 
             # Process the training batch
-            total_loss,contrastive_loss, recon_loss, kl_loss, subject_loss, config, optimizers = process_batch(
+            total_loss,contrastive_loss, recon_loss, kl_loss, subject_loss,logit_scale, config, optimizers = process_batch(
                 models, optimizers, 
                 batch_data,
-                config, logit_scale, adv_criterion, dataloader_len, is_validation=False
+                config, dataloader_len, is_validation=False
             )
 
             # Accumulate training losses
@@ -350,10 +297,10 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
                     # config.train_batch_data = vbatch_data # Pass batch data via config
 
                     # Process the validation batch
-                    total_loss,contrastive_loss, recon_loss, kl_loss, subject_loss, config, optimizers = process_batch(
+                    total_loss,contrastive_loss, recon_loss, kl_loss, subject_loss,logit_scale, config, optimizers = process_batch(
                         models, optimizers, 
                         vbatch_data,
-                        config, logit_scale, adv_criterion, val_dataloader_len, is_validation=True
+                        config,val_dataloader_len, is_validation=True
                     )
 
                     if total_loss==0:
@@ -393,6 +340,7 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
             "kl_loss": avg_train_kl_loss,
             "sub_loss": avg_train_sub_loss,
             "lr": optimizer.param_groups[0]["lr"],
+            "logit_scale": logit_scale.item(),
         }
         if val_dataloader is not None:
              log_dict.update({
@@ -423,9 +371,9 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
             print_stmt_val = (
                 f"{subject_print} Global Epoch {config.current_global_epoch}/{config.global_epochs}, "
                 f"Local Epoch {config.current_epoch}/{config.local_epochs}, "
-                f"Total Loss: {avg_val_total_loss:.4f}, Recon: {avg_val_recon_loss:.4f}, "
-                f"KL: {avg_val_kl_loss:.4f}, Contrastive: {avg_val_img_loss:.4f}, "
-                f"Subject: {avg_val_sub_loss:.4f}"
+                f"vTotal Loss: {avg_val_total_loss:.4f}, vRecon: {avg_val_recon_loss:.4f}, "
+                f"vKL: {avg_val_kl_loss:.4f}, vContrastive: {avg_val_img_loss:.4f}, "
+                f"vSubject: {avg_val_sub_loss:.4f}"
             )
             print(print_stmt_val)
            
@@ -549,47 +497,16 @@ def test(runId: str,
     # Testing loop
     with torch.no_grad():
         for teeg_batch, tlabel_batch in test_dataloader:
-            # Data is already on GPU and correct type from TensorDataset
-            # teeg_batch = teeg_batch.type(Tensor) # Redundant due to TensorDataset
-            # tlabel_batch = tlabel_batch.type(LongTensor) # Redundant due to TensorDataset
-
-            # # Apply mean reduction if configured (assuming it's done here as in train)
-            # if config and hasattr(config, 'keepDimAfterAvg'):
-            #     teeg_processed = torch.mean(teeg_batch, dim=1, keepdim=config.keepDimAfterAvg)
-            # else:
-            #     # Assuming default behavior if config is not provided or lacks the attribute
-            #     # Original code used config.keepDimAfterAvg, so let's require config for this.
-            #     print("Error: Config is required for mean reduction during testing.")
-            #     return 0.0, 0.0, 0.0
-            #     # If you want a default: teeg_processed = torch.mean(teeg_batch, dim=1, keepdim=False)
-
 
             # Encode EEG data
-            recon_output, mu_output, logvar_output, z_output, subject_logits_output, projected_z_output  = model(teeg_batch)
+            recon, mu, logvar, z, subj_logits, proj, logit_scale, use_feature_confusion = model(teeg_batch)
 
             # Apply EEG projection if used during training
             if model_eeg_proj:
-                projected_z_output = model_eeg_proj(projected_z_output)
-
-            # Compute similarity with test centers
-            # Normalize embeddings and centers before similarity calculation if needed
-            # Original code doesn't normalize before similarity, but CLIP typically does.
-            # Keeping original for now: similarity = (100.0 * eeg_embeddings @ test_center_tensor.t()).softmax(dim=-1)
-            # If normalization is needed:
-            # eeg_embeddings = eeg_embeddings / eeg_embeddings.norm(dim=1, keepdim=True)
-            # test_center_tensor_norm = test_center_tensor / test_center_tensor.norm(dim=1, keepdim=True)
-            # similarity = (100.0 * eeg_embeddings @ test_center_tensor_norm.t()).softmax(dim=-1)
+                proj = model_eeg_proj(z)
 
             # Compute similarity (using original approach)
-            similarity = (100.0 * projected_z_output @ test_center_tensor.t()).softmax(dim=-1)
-
-            # Get top-k predictions
-            # Note: The original code uses topk(5) and checks against indices[:, :1], indices[:, :3], indices
-            # `indices` from topk(5) gives the top 5 indices.
-            # `indices[:, :1]` is the top 1 index.
-            # `indices[:, :3]` are the top 3 indices.
-            # Checking `tlabel_batch == indices` sums up instances where the true label is *any* of the top 5.
-            # This seems correct for top-5 accuracy calculation.
+            similarity = (100.0 * proj @ test_center_tensor.t()).softmax(dim=-1)
             _, indices = similarity.topk(5, dim=-1) # Get top 5 indices
 
             # Reshape true labels for comparison
@@ -630,18 +547,12 @@ if __name__ == "__main__":
     # --- Configuration ---
     t_config = TrainConfig()
 
-    # Populate TrainConfig with paths from GlobalConfig
-    t_config.eeg_data_path = global_config.EEG_DATA_PATH
-    t_config.test_center_path = global_config.TEST_CENTER_PATH
-    t_config.model_save_base_dir = global_config.MODEL_BASE_DIR
-    t_config.data_base_dir = global_config.DATA_BASE_DIR # Used by EEG_Dataset3
-
     # Hyperparameters
     t_config.learning_rate = 1e-4
     t_config.discriminator_lr = 1e-4
     # Note: Batch size of 16000 is very large and might require significant GPU memory.
     # Ensure your hardware can handle this.
-    t_config.batch_size = 1000
+    t_config.batch_size = 512
     t_config.local_epochs = 100
     t_config.global_epochs = 1 # Number of passes through the entire training subject list
 
@@ -667,7 +578,7 @@ if __name__ == "__main__":
     t_config.encoder_output_dim = 768
 
     # Data Loading Config
-    t_config.cache_data = True # Cache data in memory (requires significant RAM for large datasets)
+    t_config.cache_data = False # Cache data in memory (requires significant RAM for large datasets)
     t_config.mean_eeg_data = False # Apply mean normalization to EEG data (check dataset implementation)
     # Assuming these attributes are needed by EEGVAE and EEG_Dataset3
     t_config.channels = 63 # Example value
@@ -675,7 +586,7 @@ if __name__ == "__main__":
     t_config.sessions = 4 # Example value
     t_config.image_feature_dim = 768 # Example value (e.g., CLIP feature dimension)
     t_config.latent_dim = 768 # Example value (encoder output dimension before projection)
-    t_config.num_subjects = 10 # Total number of subjects available
+    t_config.num_subjects = 4 # Total number of subjects available
 
     # Checkpoint and Run Management
     # Set run_id_to_test if you want to test a specific pre-trained run
@@ -702,14 +613,18 @@ if __name__ == "__main__":
     print(f"Run ID: {runId}")
 
     # --- Model Initialization ---
-    # Initialize core EEG encoder model
-    model = EEGVAE(
+    # Initialize core EEG encoder 
+    model = EEGTransformerVAE(
         channels= t_config.channels,
         time_points=t_config.time_points,
         sessions=t_config.sessions,
         latent_dim=t_config.latent_dim, # Latent dim might be different from encoder_output_dim depending on VAE structure
         image_feature_dim=t_config.image_feature_dim,
-        num_subjects=t_config.num_subjects # Needed for VAE if subject-conditional
+        num_subjects=t_config.num_subjects, # Needed for VAE if subject-conditional
+        encoder_only=True,
+        use_flash=True,
+        use_feature_confusion=False,
+        grl_alpha=0.1
     ).cuda()
 
     # Wrap with DataParallel if using multiple GPUs
@@ -719,8 +634,7 @@ if __name__ == "__main__":
 
     # Initialize projection models if configured
     model_img_proj: Optional[nn.Module] = None
-    if t_config.add_img_proj: # and not t_config.only_AE: # Assuming only_AE is a config flag
-        # Assuming Proj_img takes image_feature_dim as input embedding_dim
+    if t_config.add_img_proj:
         model_img_proj = Proj_img(embedding_dim=t_config.image_feature_dim, proj_dim=t_config.encoder_output_dim).cuda()
         if len(GPUS) > 1:
             model_img_proj = nn.DataParallel(model_img_proj, device_ids=GPUS)
@@ -735,18 +649,6 @@ if __name__ == "__main__":
 
     # Initialize Subject Discriminator if adversarial training is enabled
     subj_discriminator: Optional[nn.Module] = None
-    # if t_config.enable_adv_training:
-    #     # Assuming SubjectDiscriminator takes encoder_output_dim as input embed_dim
-    #     # and the total number of subjects for classification
-    #     # Note: The original code used embed_dim=768 and num_subjects=11 (for subjects 1-10?).
-    #     # Let's use encoder_output_dim and t_config.num_subjects.
-    #     subj_discriminator = SubjectDiscriminator(embed_dim=t_config.encoder_output_dim,
-    #                                               num_subjects=t_config.num_subjects + 1, # If subjects are 1-indexed and num_subjects is max ID
-    #                                               alpha=t_config.alpha # Initial alpha, will be scheduled
-    #                                              ).cuda()
-    #     if len(GPUS) > 1:
-    #         subj_discriminator = nn.DataParallel(subj_discriminator, device_ids=GPUS)
-    #     subj_discriminator.apply(weights_init_normal)
 
 
     # --- Optimizer and Scheduler Setup ---

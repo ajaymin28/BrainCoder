@@ -8,6 +8,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TemporalBlock(nn.Module):
+    def __init__(self, in_c, out_c):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_c, out_c, kernel_size=5, stride=2, padding=2),
+            nn.BatchNorm1d(out_c),
+            nn.LeakyReLU(0.1)
+        )
+        self.skip = nn.Conv1d(in_c, out_c, kernel_size=1, stride=2)
+
+    def forward(self, x):
+        return self.conv(x) + self.skip(x)
+
+
 class EEGVAE(nn.Module):
     def __init__(self, channels=63, time_points=250, sessions=4, latent_dim=384, image_feature_dim=384, num_subjects=5):
         super(EEGVAE, self).__init__()
@@ -16,176 +34,293 @@ class EEGVAE(nn.Module):
         self.sessions = sessions
         self.latent_dim = latent_dim
 
-        # 1D temporal conv over time axis
-        # Operates on [batch*sessions, channels, time]
         self.temporal_conv = nn.Sequential(
-            nn.Conv1d(channels, 64, kernel_size=5, stride=2, padding=2),  # -> [batch*sessions, 64, 125]
-            nn.ReLU(),
-            nn.Conv1d(64, 128, kernel_size=5, stride=2, padding=2),       # -> [batch*sessions, 128, 63]
-            nn.ReLU(),
-            nn.Conv1d(128, 256, kernel_size=5, stride=2, padding=2),       # -> [batch*sessions, 256, 32]
-            nn.ReLU()
+            TemporalBlock(channels, 64),
+            TemporalBlock(64, 128),
+            TemporalBlock(128, 256)
         )
 
-        # Spatial conv
-        # Operates on [batch*sessions, 1, 256, 32] after unsqueezing
         self.spatial_conv = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=(3, 3), stride=1, padding=1),     # -> [batch*sessions, 64, 256, 32]
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=(3, 3), stride=2, padding=1),  # -> [batch*sessions, 128, 128, 16]
-            nn.ReLU()
+            nn.Conv2d(1, 64, kernel_size=(3, 3), stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ELU(0.1),
+            nn.Conv2d(64, 128, kernel_size=(3, 3), stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ELU(0.1)
         )
 
-        # Flattened dimension after spatial conv
-        # Shape is [batch*sessions, 128, 128, 16]
         self.flatten_dim = 128 * 128 * 16
 
-        # Linear layers for mu and logvar
-        # Operate on [batch*sessions, flatten_dim]
-        self.fc_mu = nn.Linear(self.flatten_dim, latent_dim)     # -> [batch*sessions, latent_dim]
-        self.fc_logvar = nn.Linear(self.flatten_dim, latent_dim) # -> [batch*sessions, latent_dim]
+        self.fc_mu = nn.Linear(self.flatten_dim, latent_dim)
+        self.fc_logvar = nn.Linear(self.flatten_dim, latent_dim)
 
-        # Subject classifier head - This will now operate on the session-averaged latent code
-        # if we still want a single subject prediction per batch item.
-        # If subject prediction should be session-specific, this head needs adjustment.
-        # Keeping it operating on an averaged latent for now, as per original structure.
         self.subject_classifier = nn.Sequential(
-            nn.Linear(latent_dim, 128), # Input shape will be [batch, latent_dim] after averaging
-            nn.ReLU(),
+            nn.Linear(latent_dim, 128),
+            nn.ELU(),
             nn.Linear(128, 64),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(64, num_subjects)
         )
 
-        # Decoder
-        # The decoder will take session-specific latent codes [batch*sessions, latent_dim]
-        self.decoder_fc = nn.Linear(latent_dim, self.flatten_dim) # -> [batch*sessions, flatten_dim]
+        self.decoder_fc = nn.Linear(latent_dim, self.flatten_dim)
 
-        # Spatial decoder
-        # Operates on [batch*sessions, 128, 128, 16] after reshaping decoder_fc output
         self.decoder_spatial = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=(3, 3), stride=2, padding=1, output_padding=(1,1)),  # -> [batch*sessions, 64, 256, 32]
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 1, kernel_size=(3, 3), stride=1, padding=1),                         # -> [batch*sessions, 1, 256, 32]
-            nn.ReLU()
+            nn.ConvTranspose2d(128, 64, kernel_size=(3, 3), stride=2, padding=1, output_padding=(1, 1)),
+            nn.BatchNorm2d(64),
+            nn.ELU(),
+            nn.ConvTranspose2d(64, 1, kernel_size=(3, 3), stride=1, padding=1),
         )
 
-        # Temporal decoder
-        # Operates on [batch*sessions, 256, 32] after squeezing spatial decoder output
         self.decoder_temporal = nn.Sequential(
-            nn.ConvTranspose1d(256, 128, kernel_size=4, stride=2, padding=1),  # -> [batch*sessions, 128, 64]
-            nn.ReLU(),
-            nn.ConvTranspose1d(128, 64, kernel_size=4, stride=2, padding=1),  # -> [batch*sessions, 64, 128]
-            nn.ReLU(),
-            # Adjusted padding to get output size 250 from input size 128 with kernel 5, stride 2, output_padding 1
-            nn.ConvTranspose1d(64, channels, kernel_size=5, stride=2, padding=5, output_padding=1), # -> [batch*sessions, channels, 250]
-            nn.ReLU() # Added ReLU for consistency
+            nn.ConvTranspose1d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm1d(128),
+            nn.ELU(),
+            nn.ConvTranspose1d(128, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm1d(64),
+            nn.ELU(),
+            nn.ConvTranspose1d(64, channels, kernel_size=5, stride=2, padding=5, output_padding=1),
         )
 
-        # Projection head (for contrastive loss) - Also operates on session-averaged latent code
         self.projection_head = nn.Sequential(
-            nn.Linear(latent_dim, 128), # Input shape will be [batch, latent_dim] after averaging
-            nn.ReLU(),
+            nn.Linear(latent_dim, 128),
+            nn.ELU(),
             nn.Linear(128, image_feature_dim)
         )
 
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.ConvTranspose1d, nn.ConvTranspose2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
     def encode(self, x):
-        # x shape: [batch, sessions, channels, time] -> [32, 4, 63, 250]
         batch, sessions, channels, time = x.shape
-        # Flatten batch and sessions for temporal conv
-        x = x.view(batch * sessions, channels, time)  # [128, 63, 250]
-        x = self.temporal_conv(x)  # [128, 256, 32]
-        x = x.unsqueeze(1)  # Add channel dimension for spatial conv: [128, 1, 256, 32]
-        x = self.spatial_conv(x)  # [128, 128, 128, 16]
-        # Flatten for linear layers
-        x = x.view(batch * sessions, -1)  # [128, 262144]
-        # Apply linear layers to get session-specific mu and logvar
-        mu = self.fc_mu(x)  # [128, 384]
-        logvar = self.fc_logvar(x)  # [128, 384]
-
-        # Reshape back to include sessions dimension, preserving session-specific info
-        mu = mu.view(batch, sessions, self.latent_dim)  # [32, 4, 384]
-        logvar = logvar.view(batch, sessions, self.latent_dim) # [32, 4, 384]
-
-        # Note: Mu and logvar now contain session-specific information.
-        # The averaging across sessions for the final latent code z will be removed
-        # in the forward pass for the VAE reconstruction path, but kept for
-        # the subject classifier and projection head if they are meant to operate
-        # on a subject-level representation.
-
+        x = x.view(batch * sessions, channels, time)
+        x = self.temporal_conv(x)
+        x = x.unsqueeze(1)
+        x = self.spatial_conv(x)
+        x = x.view(batch * sessions, -1)
+        mu = self.fc_mu(x)
+        logvar = F.softplus(self.fc_logvar(x)) + 1e-4
+        logvar = torch.clamp(logvar, max=20)
+        mu = mu.view(batch, sessions, self.latent_dim)
+        logvar = logvar.view(batch, sessions, self.latent_dim)
         return mu, logvar
-
+    
     def reparameterize(self, mu, logvar):
-        # mu, logvar shape: [batch, sessions, latent_dim]
-        std = torch.exp(0.5 * logvar).to(mu.device).type(mu.dtype)  # [batch, sessions, latent_dim]
-        eps = torch.randn_like(std).to(mu.device) .type(mu.dtype)
-        # z shape: [batch, sessions, latent_dim]
-        return mu + eps * std
+        std = torch.sqrt(logvar)  # Because you already softplus+clamped logvar to be positive
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        z = torch.clamp(z, min=-1e2, max=1e2)  # Hard safety clamp
+        return z
 
     def decode(self, z):
-        # z shape: [batch*sessions, latent_dim] - will be reshaped in forward
-        # Decode latent code back to flattened spatial representation
-        x = self.decoder_fc(z)  # [batch*sessions, flatten_dim]
-        # Reshape to match the input shape of the spatial decoder
-        x = x.view(z.shape[0], 128, 128, 16)  # [batch*sessions, 128, 128, 16]
-        # Apply spatial decoder
-        x = self.decoder_spatial(x)  # [batch*sessions, 1, 256, 32]
-        # Squeeze the channel dimension for temporal decoder
-        x = x.squeeze(1)  # [batch*sessions, 256, 32]
-        # Apply temporal decoder
-        x = self.decoder_temporal(x)  # [batch*sessions, channels, time]
-
-        # The decoder outputs reconstructions for each session, flattened along batch*sessions
+        x = self.decoder_fc(z)
+        x = x.view(z.shape[0], 128, 128, 16)
+        x = self.decoder_spatial(x)
+        x = x.squeeze(1)
+        x = self.decoder_temporal(x)
         return x
 
     def forward(self, x):
-        # x shape: [batch, sessions, channels, time]
-        # print(x.shape)
-        batch, sessions, channels, time = x.shape
+        batch, sessions, _, _ = x.shape
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        # z_flat = z.view(batch * sessions, self.latent_dim)
+        # recon = self.decode(z_flat).view(batch, sessions, self.channels, self.time_points)
+        recon = 0
+        z_avg = z.mean(dim=1)
+        mu_avg = mu.mean(dim=1)
+        logvar_avg = logvar.mean(dim=1)
+        subject_logits = self.subject_classifier(z_avg)
+        projected_z = self.project_to_image_space(z_avg)
+        return recon, mu_avg, logvar_avg, z, subject_logits, projected_z
 
-        # Encode to get session-specific mu and logvar
-        mu_session_specific, logvar_session_specific = self.encode(x) # Shapes: [batch, sessions, latent_dim]
-
-        # Reparameterize using session-specific mu and logvar
-        z_session_specific = self.reparameterize(mu_session_specific, logvar_session_specific) # Shape: [batch, sessions, latent_dim]
-
-        # For VAE reconstruction, flatten z across batch and sessions to process session-wise
-        z_flattened_for_decode = z_session_specific.view(batch * sessions, self.latent_dim) # Shape: [batch*sessions, latent_dim]
-
-        # Decode using the flattened session-specific latent codes
-        recon_flattened = self.decode(z_flattened_for_decode) # Shape: [batch*sessions, channels, time]
-
-        # Reshape the reconstruction back to include batch and sessions dimensions
-        recon = recon_flattened.view(batch, sessions, channels, time) # Shape: [batch, sessions, channels, time]
-
-        # For subject classification and projection head, use the session-averaged latent code
-        # This assumes these heads are meant to represent the subject-level features,
-        # not session-specific features. If session-specific features are needed,
-        # these heads would need to be applied to z_session_specific and results aggregated or handled differently.
-        # We calculate the session-averaged z here for compatibility with the original heads.
-        z_averaged_for_heads = z_session_specific.mean(dim=1) # Shape: [batch, latent_dim]
-        mu_averaged_for_heads = mu_session_specific.mean(dim=1) # Shape: [batch, latent_dim]
-        logvar_averaged_for_heads = logvar_session_specific.mean(dim=1) # Shape: [batch, latent_dim]
+    def project_to_image_space(self, z_avg):
+        return self.projection_head(z_avg)
 
 
-        subject_logits = self.subject_classifier(z_averaged_for_heads) # Shape: [batch, num_subjects]
-        projected_z = self.project_to_image_space(z_averaged_for_heads) # Shape: [batch, image_feature_dim]
+# class EEGVAE(nn.Module):
+#     def __init__(self, channels=63, time_points=250, sessions=4, latent_dim=384, image_feature_dim=384, num_subjects=5):
+#         super(EEGVAE, self).__init__()
+#         self.channels = channels
+#         self.time_points = time_points
+#         self.sessions = sessions
+#         self.latent_dim = latent_dim
+
+#         # 1D temporal conv over time axis
+#         # Operates on [batch*sessions, channels, time]
+#         self.temporal_conv = nn.Sequential(
+#             nn.Conv1d(channels, 64, kernel_size=5, stride=2, padding=2),  # -> [batch*sessions, 64, 125]
+#             nn.ReLU(),
+#             nn.Conv1d(64, 128, kernel_size=5, stride=2, padding=2),       # -> [batch*sessions, 128, 63]
+#             nn.ReLU(),
+#             nn.Conv1d(128, 256, kernel_size=5, stride=2, padding=2),       # -> [batch*sessions, 256, 32]
+#             nn.ReLU()
+#         )
+
+#         # Spatial conv
+#         # Operates on [batch*sessions, 1, 256, 32] after unsqueezing
+#         self.spatial_conv = nn.Sequential(
+#             nn.Conv2d(1, 64, kernel_size=(3, 3), stride=1, padding=1),     # -> [batch*sessions, 64, 256, 32]
+#             nn.ReLU(),
+#             nn.Conv2d(64, 128, kernel_size=(3, 3), stride=2, padding=1),  # -> [batch*sessions, 128, 128, 16]
+#             nn.ReLU()
+#         )
+
+#         # Flattened dimension after spatial conv
+#         # Shape is [batch*sessions, 128, 128, 16]
+#         self.flatten_dim = 128 * 128 * 16
+
+#         # Linear layers for mu and logvar
+#         # Operate on [batch*sessions, flatten_dim]
+#         self.fc_mu = nn.Linear(self.flatten_dim, latent_dim)     # -> [batch*sessions, latent_dim]
+#         self.fc_logvar = nn.Linear(self.flatten_dim, latent_dim) # -> [batch*sessions, latent_dim]
+
+#         # Subject classifier head - This will now operate on the session-averaged latent code
+#         # if we still want a single subject prediction per batch item.
+#         # If subject prediction should be session-specific, this head needs adjustment.
+#         # Keeping it operating on an averaged latent for now, as per original structure.
+#         self.subject_classifier = nn.Sequential(
+#             nn.Linear(latent_dim, 128), # Input shape will be [batch, latent_dim] after averaging
+#             nn.ReLU(),
+#             nn.Linear(128, 64),
+#             nn.ReLU(),
+#             nn.Linear(64, num_subjects)
+#         )
+
+#         # Decoder
+#         # The decoder will take session-specific latent codes [batch*sessions, latent_dim]
+#         self.decoder_fc = nn.Linear(latent_dim, self.flatten_dim) # -> [batch*sessions, flatten_dim]
+
+#         # Spatial decoder
+#         # Operates on [batch*sessions, 128, 128, 16] after reshaping decoder_fc output
+#         self.decoder_spatial = nn.Sequential(
+#             nn.ConvTranspose2d(128, 64, kernel_size=(3, 3), stride=2, padding=1, output_padding=(1,1)),  # -> [batch*sessions, 64, 256, 32]
+#             nn.ReLU(),
+#             nn.ConvTranspose2d(64, 1, kernel_size=(3, 3), stride=1, padding=1),                         # -> [batch*sessions, 1, 256, 32]
+#             nn.ReLU()
+#         )
+
+#         # Temporal decoder
+#         # Operates on [batch*sessions, 256, 32] after squeezing spatial decoder output
+#         self.decoder_temporal = nn.Sequential(
+#             nn.ConvTranspose1d(256, 128, kernel_size=4, stride=2, padding=1),  # -> [batch*sessions, 128, 64]
+#             nn.ReLU(),
+#             nn.ConvTranspose1d(128, 64, kernel_size=4, stride=2, padding=1),  # -> [batch*sessions, 64, 128]
+#             nn.ReLU(),
+#             # Adjusted padding to get output size 250 from input size 128 with kernel 5, stride 2, output_padding 1
+#             nn.ConvTranspose1d(64, channels, kernel_size=5, stride=2, padding=5, output_padding=1), # -> [batch*sessions, channels, 250]
+#             nn.ReLU() # Added ReLU for consistency
+#         )
+
+#         # Projection head (for contrastive loss) - Also operates on session-averaged latent code
+#         self.projection_head = nn.Sequential(
+#             nn.Linear(latent_dim, 128), # Input shape will be [batch, latent_dim] after averaging
+#             nn.ReLU(),
+#             nn.Linear(128, image_feature_dim)
+#         )
+
+#     def encode(self, x):
+#         # x shape: [batch, sessions, channels, time] -> [32, 4, 63, 250]
+#         batch, sessions, channels, time = x.shape
+#         # Flatten batch and sessions for temporal conv
+#         x = x.view(batch * sessions, channels, time)  # [128, 63, 250]
+#         x = self.temporal_conv(x)  # [128, 256, 32]
+#         x = x.unsqueeze(1)  # Add channel dimension for spatial conv: [128, 1, 256, 32]
+#         x = self.spatial_conv(x)  # [128, 128, 128, 16]
+#         # Flatten for linear layers
+#         x = x.view(batch * sessions, -1)  # [128, 262144]
+#         # Apply linear layers to get session-specific mu and logvar
+#         mu = self.fc_mu(x)  # [128, 384]
+#         logvar = self.fc_logvar(x)  # [128, 384]
+
+#         # Reshape back to include sessions dimension, preserving session-specific info
+#         mu = mu.view(batch, sessions, self.latent_dim)  # [32, 4, 384]
+#         logvar = logvar.view(batch, sessions, self.latent_dim) # [32, 4, 384]
+
+#         # Note: Mu and logvar now contain session-specific information.
+#         # The averaging across sessions for the final latent code z will be removed
+#         # in the forward pass for the VAE reconstruction path, but kept for
+#         # the subject classifier and projection head if they are meant to operate
+#         # on a subject-level representation.
+
+#         return mu, logvar
+
+#     def reparameterize(self, mu, logvar):
+#         # mu, logvar shape: [batch, sessions, latent_dim]
+#         std = torch.exp(0.5 * logvar).to(mu.device).type(mu.dtype)  # [batch, sessions, latent_dim]
+#         eps = torch.randn_like(std).to(mu.device).type(mu.dtype)
+#         # z shape: [batch, sessions, latent_dim]
+#         return mu + eps * std
+
+#     def decode(self, z):
+#         # z shape: [batch*sessions, latent_dim] - will be reshaped in forward
+#         # Decode latent code back to flattened spatial representation
+#         x = self.decoder_fc(z)  # [batch*sessions, flatten_dim]
+#         # Reshape to match the input shape of the spatial decoder
+#         x = x.view(z.shape[0], 128, 128, 16)  # [batch*sessions, 128, 128, 16]
+#         # Apply spatial decoder
+#         x = self.decoder_spatial(x)  # [batch*sessions, 1, 256, 32]
+#         # Squeeze the channel dimension for temporal decoder
+#         x = x.squeeze(1)  # [batch*sessions, 256, 32]
+#         # Apply temporal decoder
+#         x = self.decoder_temporal(x)  # [batch*sessions, channels, time]
+
+#         # The decoder outputs reconstructions for each session, flattened along batch*sessions
+#         return x
+
+#     def forward(self, x):
+#         # x shape: [batch, sessions, channels, time]
+#         # print(x.shape)
+#         batch, sessions, channels, time = x.shape
+
+#         # Encode to get session-specific mu and logvar
+#         mu_session_specific, logvar_session_specific = self.encode(x) # Shapes: [batch, sessions, latent_dim]
+
+#         # Reparameterize using session-specific mu and logvar
+#         z_session_specific = self.reparameterize(mu_session_specific, logvar_session_specific) # Shape: [batch, sessions, latent_dim]
+
+#         # For VAE reconstruction, flatten z across batch and sessions to process session-wise
+#         z_flattened_for_decode = z_session_specific.view(batch * sessions, self.latent_dim) # Shape: [batch*sessions, latent_dim]
+
+#         # Decode using the flattened session-specific latent codes
+#         recon_flattened = self.decode(z_flattened_for_decode) # Shape: [batch*sessions, channels, time]
+
+#         # Reshape the reconstruction back to include batch and sessions dimensions
+#         recon = recon_flattened.view(batch, sessions, channels, time) # Shape: [batch, sessions, channels, time]
+
+#         # For subject classification and projection head, use the session-averaged latent code
+#         # This assumes these heads are meant to represent the subject-level features,
+#         # not session-specific features. If session-specific features are needed,
+#         # these heads would need to be applied to z_session_specific and results aggregated or handled differently.
+#         # We calculate the session-averaged z here for compatibility with the original heads.
+#         z_averaged_for_heads = z_session_specific.mean(dim=1) # Shape: [batch, latent_dim]
+#         mu_averaged_for_heads = mu_session_specific.mean(dim=1) # Shape: [batch, latent_dim]
+#         logvar_averaged_for_heads = logvar_session_specific.mean(dim=1) # Shape: [batch, latent_dim]
 
 
-        # Return reconstruction, session-averaged mu and logvar (for KLD loss calculation),
-        # session-specific z, subject logits, and projected z.
-        # Note: KLD loss should ideally use the session-specific mu and logvar,
-        # calculated per session and then potentially summed/averaged over sessions and batch.
-        # The returned mu_averaged_for_heads and logvar_averaged_for_heads are for potential
-        # compatibility with a loss function expecting batch-level mu/logvar, but using
-        # mu_session_specific and logvar_session_specific directly for KLD is more correct
-        # for a session-specific VAE.
-        return recon, mu_averaged_for_heads, logvar_averaged_for_heads, z_session_specific, subject_logits, projected_z
+#         subject_logits = self.subject_classifier(z_averaged_for_heads) # Shape: [batch, num_subjects]
+#         projected_z = self.project_to_image_space(z_averaged_for_heads) # Shape: [batch, image_feature_dim]
 
 
-    def project_to_image_space(self, z_averaged):
-        # z_averaged shape: [batch, latent_dim]
-        return self.projection_head(z_averaged)
+#         # Return reconstruction, session-averaged mu and logvar (for KLD loss calculation),
+#         # session-specific z, subject logits, and projected z.
+#         # Note: KLD loss should ideally use the session-specific mu and logvar,
+#         # calculated per session and then potentially summed/averaged over sessions and batch.
+#         # The returned mu_averaged_for_heads and logvar_averaged_for_heads are for potential
+#         # compatibility with a loss function expecting batch-level mu/logvar, but using
+#         # mu_session_specific and logvar_session_specific directly for KLD is more correct
+#         # for a session-specific VAE.
+#         return recon, mu_averaged_for_heads, logvar_averaged_for_heads, z_session_specific, subject_logits, projected_z
+
+
+#     def project_to_image_space(self, z_averaged):
+#         # z_averaged shape: [batch, latent_dim]
+#         return self.projection_head(z_averaged)
 
 
 
@@ -224,7 +359,7 @@ def vae_loss(model, recon_x, x, mu_averaged_for_heads, logvar_averaged_for_heads
     # --- 1. Reconstruction Loss ---
     # Calculate MSE loss between reconstructed and original data.
     # The reduction='mean' averages over all elements in the batch, sessions, channels, and time.
-    recon_loss = F.mse_loss(recon_x, x, reduction='mean')
+    # recon_loss = F.mse_loss(recon_x, x, reduction='mean')
 
     # --- 2. KL Divergence ---
     # Calculate KL divergence for each session's latent distribution.
@@ -270,6 +405,7 @@ def vae_loss(model, recon_x, x, mu_averaged_for_heads, logvar_averaged_for_heads
     # The subject loss is subtracted because it's an adversarial loss aiming
     # to make the latent space less discriminative of the subject.
     total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss - gamma * subject_loss
+
 
     return total_loss, recon_loss, kl_loss, contrastive_loss, subject_loss
 
