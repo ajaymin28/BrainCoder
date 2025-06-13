@@ -10,9 +10,9 @@ import pickle
 from tqdm import tqdm
 import copy
 
-EEG_DATA_PATH = 'D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\Data\\Things-EEG2\\Preprocessed_data_250Hz\\'
-IMG_DATA_PATH = 'D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\dnn_feature\\'
-TEST_CENTER_PATH = 'D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG\\dnn_feature\\'
+EEG_DATA_PATH = '/home/jbhol/EEG/gits/NICE-EEG/Data/Things-EEG2/Preprocessed_data_250Hz'
+IMG_DATA_PATH = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature'
+TEST_CENTER_PATH = '/home/jbhol/EEG/gits/NICE-EEG/dnn_feature'
 
 
 

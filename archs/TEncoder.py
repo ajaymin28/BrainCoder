@@ -38,7 +38,7 @@ class PositionalEncoding(nn.Module):
         return x
 
 class EEGTransformerVAE(nn.Module):
-    def __init__(self, channels=63, time_points=250, sessions=4, latent_dim=384, image_feature_dim=384, num_subjects=5, grl_alpha=1.0, encoder_only=False, use_flash=False, use_feature_confusion=False):
+    def __init__(self, channels=63, time_points=250, sessions=4, latent_dim=384, image_feature_dim=384, num_subjects=5, grl_alpha=1.0, encoder_only=False, use_flash=False, use_feature_confusion=False,mean_session=False):
         super().__init__()
         self.channels = channels
         self.time_points = time_points
@@ -48,6 +48,7 @@ class EEGTransformerVAE(nn.Module):
         self.encoder_only = encoder_only
         self.use_flash = use_flash and FLASH_AVAILABLE
         self.use_feature_confusion = use_feature_confusion
+        self.mean_session = mean_session  # <-- store flag
 
         self.input_projection = nn.Linear(channels, latent_dim)
         self.pos_encoder = PositionalEncoding(latent_dim, max_len=time_points)
@@ -94,15 +95,34 @@ class EEGTransformerVAE(nn.Module):
 
     def encode(self, x):
         batch, sessions, channels, time = x.shape
-        x = x.permute(0, 1, 3, 2).contiguous().view(batch * sessions, time, channels)
+
+        if self.mean_session:
+            x = x.mean(dim=1, keepdim=True)  # [B, 1, C, T]
+
+        x = x.permute(0, 1, 3, 2).contiguous().view(-1, self.time_points, self.channels)
         x = self.input_projection(x)
         x = self.pos_encoder(x)
         x = self.transformer_encoder(x)
-        x = x.reshape(batch * sessions, -1)
+        x = x.reshape(x.size(0), -1)
         mu = self.fc_mu(x)
-        # logvar = F.softplus(self.fc_logvar(x)) + 1e-4
         logvar = self.fc_logvar(x)
-        return mu.view(batch, sessions, -1), logvar.view(batch, sessions, -1)
+
+        if self.mean_session:
+            # Shape will be [B, 1, latent_dim]
+            return mu.view(batch, 1, -1), logvar.view(batch, 1, -1)
+        else:
+            # Shape will be [B, S, latent_dim]
+            return mu.view(batch, sessions, -1), logvar.view(batch, sessions, -1)
+
+        # x = x.permute(0, 1, 3, 2).contiguous().view(batch * sessions, time, channels)
+        # x = self.input_projection(x)
+        # x = self.pos_encoder(x)
+        # x = self.transformer_encoder(x)
+        # x = x.reshape(batch * sessions, -1)
+        # mu = self.fc_mu(x)
+        # # logvar = F.softplus(self.fc_logvar(x)) + 1e-4
+        # logvar = self.fc_logvar(x)
+        # return mu.view(batch, sessions, -1), logvar.view(batch, sessions, -1)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
@@ -123,8 +143,13 @@ class EEGTransformerVAE(nn.Module):
 
         # Encoding
         mu, logvar = self.encode(x)  # Shape: [B, S, latent_dim]
-        z = self.reparameterize(mu, logvar)  # [B, S, latent_dim]
-        z_flat = z.view(batch * sessions, self.latent_dim)
+        z = self.reparameterize(mu, logvar)  # shape: [B, 1, latent_dim] if mean_session else [B, S, latent_dim]
+        if self.mean_session:
+            z_flat = z.view(batch, self.latent_dim) # single mean session
+        else:
+            z_flat = z.view(batch * self.sessions, self.latent_dim)
+
+        # Compute KL loss   
         z_avg = z.mean(dim=1)
         mu_avg = mu.mean(dim=1)
         logvar_avg = logvar.mean(dim=1)
@@ -132,7 +157,10 @@ class EEGTransformerVAE(nn.Module):
         # Decode if training full model
         recon = None
         if not self.encoder_only:
-            recon = self.decode(z_flat).view(batch, sessions, self.channels, self.time_points)
+            if self.mean_session:
+                recon = self.decode(z_flat).view(batch, 1, self.channels, self.time_points)
+            else:
+                recon = self.decode(z_flat).view(batch, self.sessions, self.channels, self.time_points)
 
         # Projection Head to image space
         projected_z = self.projection_head(z_avg)

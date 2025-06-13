@@ -42,7 +42,7 @@ parser.add_argument('--epoch', default='200', type=int)
 parser.add_argument('--cycles', default='5', type=int)
 parser.add_argument('--pretrain_fd_epoch', default='25', type=int)
 parser.add_argument('--pretrain_img_epoch', default='200', type=int)
-parser.add_argument('--num_sub', default=1, type=int,
+parser.add_argument('--num_sub', default=2, type=int,
                     help='number of subjects used in the experiments. ')
 parser.add_argument('-batch_size', '--batch-size', default=256, type=int,
                     metavar='N',
@@ -795,7 +795,7 @@ def main():
     # run_id="20250125/193853/df62e743"
     # 20250126/081918/8cf47f3f
     ## "20250126/081918/8cf47f3f" trained 2,5 subjects with 1 being cross.
-    runMan = RunManager(run_id="20250130/102012/d21bd321") 
+    runMan = RunManager(run_id=None) 
     runId = runMan.getRunID()
     
     for i in range(num_sub):
@@ -821,12 +821,12 @@ def main():
         # print('THE BEST ACCURACY IS ' + str(Acc))
         # print("Pretraining Done")
 
-        # Acc, Acc3, Acc5 = ie.fine_tune(subjectId=i+1, runId=runId) #Stage 1
+        Acc, Acc3, Acc5 = ie.fine_tune(subjectId=i+1, runId=runId) #Stage 1
         # # print('THE BEST ACCURACY IS ' + str(Acc))
 
         # Acc, Acc3, Acc5 = ie.feature_decompose(runId=runId) #Stage 2
 
-        Acc, Acc3, Acc5 = ie.test(subjectId=i+1, runId=runId, withFeatureDecompose=True, pretrained_subject_id=1)
+        # Acc, Acc3, Acc5 = ie.test(subjectId=i+1, runId=runId, withFeatureDecompose=True, pretrained_subject_id=1)
         # Acc, Acc3, Acc5 = ie.test(subjectId=2, runId=runId, withFeatureDecompose=True, pretrained_subject_id=1)
 
         print('THE BEST ACCURACY IS ' + str(Acc))

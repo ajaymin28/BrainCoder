@@ -12,14 +12,14 @@ from typing import List, Tuple, Dict, Any, Optional
 
 # Assuming these are custom modules
 from archs.TEncoder import EEGTransformerVAE
-from archs.nice import Proj_eeg, Proj_img
+from archs.nice import Proj_eeg, Proj_img, Enc_eeg
 from archs.CNNTrans import SubjectDiscriminator
 from utils.common import (CheckpointManager, RunManager, TrainConfig, config_to_dict,
                           freeze_model, memory_stats, weights_init_normal)
 # Assuming get_eeg_data is in utils.eeg_utils and uses paths passed to it
 from utils.eeg_utils import get_eeg_data
 from utils.datasets import EEG_Dataset3 # Assuming EEG_Dataset3 uses paths passed to it
-from utils.losses import vae_loss # Assuming get_contrastive_loss is implemented
+# from utils.losses import vae_loss # Assuming get_contrastive_loss is implemented
 
 
 # Import the new global configuration
@@ -37,7 +37,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, GPUS))
 Tensor = torch.cuda.FloatTensor
 LongTensor = torch.cuda.LongTensor
 
-def vae_loss(recon_x, x, mu, logvar, projected_z, image_features, subject_logits, subject_labels, logit_scale, use_feature_confusion, beta=1.0, alpha=1.0, gamma=1.0):
+def vae_loss(recon_x, x, mu, logvar, projected_z, image_features, subject_logits, subject_labels, logit_scale, use_feature_confusion, beta=1.0, alpha=1.0, gamma=0):
     if recon_x is not None:
         recon_loss = F.mse_loss(recon_x, x, reduction='mean')
         kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
@@ -47,7 +47,7 @@ def vae_loss(recon_x, x, mu, logvar, projected_z, image_features, subject_logits
 
     proj_z_normalized = F.normalize(projected_z, dim=-1)
     image_features_normalized = F.normalize(image_features, dim=-1)
-    logits = torch.matmul(proj_z_normalized, image_features_normalized.T) * logit_scale.exp().clamp(1, 100)
+    logits = torch.matmul(proj_z_normalized, image_features_normalized.T) * logit_scale.exp()
     labels = torch.arange(proj_z_normalized.shape[0], device=proj_z_normalized.device)
     contrastive_loss = F.cross_entropy(logits, labels)
 
@@ -55,14 +55,14 @@ def vae_loss(recon_x, x, mu, logvar, projected_z, image_features, subject_logits
         probs = F.softmax(subject_logits, dim=-1)
         uniform = torch.full_like(probs, 1.0 / probs.size(1))
         subject_loss = F.kl_div(probs.log(), uniform, reduction='batchmean')
-        subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
-        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss + gamma * subject_loss_clamped
+        # subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
+        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss + gamma * subject_loss
     else:
         subject_loss = F.cross_entropy(subject_logits, subject_labels)
-        subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
-        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss - gamma * subject_loss_clamped
+        # subject_loss_clamped = torch.clamp(subject_loss, max=1.0)
+        total_loss = recon_loss + beta * kl_loss + alpha * contrastive_loss - gamma * subject_loss
 
-    return total_loss, recon_loss, kl_loss, contrastive_loss, subject_loss_clamped
+    return total_loss, recon_loss, kl_loss, contrastive_loss, subject_loss
 
 # --- Helper Functions ---
 
@@ -206,7 +206,7 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
     # logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda() # Ensure logit_scale is on GPU
 
     # Criterion for adversarial training
-    adv_criterion = nn.CrossEntropyLoss() if config.enable_adv_training else None
+    # adv_criterion = nn.CrossEntropyLoss() if config.enable_adv_training else None
 
     # Checkpoint managers - Use path from config
     cpm_AEnc_eeg = CheckpointManager(prefix="AEnc_eeg", base_dir=os.path.join(config.model_save_base_dir, runId))
@@ -302,9 +302,6 @@ def train(models: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module], Opt
                         vbatch_data,
                         config,val_dataloader_len, is_validation=True
                     )
-
-                    if total_loss==0:
-                        continue
 
                     # Accumulate validation losses
                     val_losses["total"] += total_loss
@@ -563,7 +560,7 @@ if __name__ == "__main__":
     t_config.MultiSubject = True # Set to True for multi-subject training
     t_config.TestSubject = 1 # This subject will be used for testing, others for training
     # Note: If MultiSubject is False, this subject is used for both train/val/test (split handled by get_eeg_data/EEG_Dataset3)
-    t_config.keep_dim_after_mean = False # for NICE model use true else False
+    
 
     # Adversarial Training Config
     t_config.enable_adv_training = True
@@ -580,13 +577,14 @@ if __name__ == "__main__":
     # Data Loading Config
     t_config.cache_data = False # Cache data in memory (requires significant RAM for large datasets)
     t_config.mean_eeg_data = False # Apply mean normalization to EEG data (check dataset implementation)
+    t_config.keep_dim_after_mean = False # for NICE model use true else False
     # Assuming these attributes are needed by EEGVAE and EEG_Dataset3
     t_config.channels = 63 # Example value
     t_config.time_points = 250 # Example value
     t_config.sessions = 4 # Example value
     t_config.image_feature_dim = 768 # Example value (e.g., CLIP feature dimension)
     t_config.latent_dim = 768 # Example value (encoder output dimension before projection)
-    t_config.num_subjects = 4 # Total number of subjects available
+    t_config.num_subjects = 2 # Total number of subjects available
 
     # Checkpoint and Run Management
     # Set run_id_to_test if you want to test a specific pre-trained run
@@ -624,7 +622,8 @@ if __name__ == "__main__":
         encoder_only=True,
         use_flash=True,
         use_feature_confusion=False,
-        grl_alpha=0.1
+        grl_alpha=0.1,
+        mean_session=t_config.mean_eeg_data
     ).cuda()
 
     # Wrap with DataParallel if using multiple GPUs

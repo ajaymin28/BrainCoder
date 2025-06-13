@@ -126,8 +126,6 @@ class CNNTrans(nn.Module):
         # Batch norm and dropout
         x = self.bn(x)  # (B, 40, 33)
         x = self.dropout(x)  # (B, 40, 33)
-
-
         
         # Flatten and final embedding
         x = x.view(x.size(0), -1)  # (B, 1320)
