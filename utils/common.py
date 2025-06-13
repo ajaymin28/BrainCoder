@@ -18,8 +18,8 @@ class GlobalConfig:
     """
     # --- Base Directories ---
     # Adjust these paths based on your project structure and environment
-    PROJECT_ROOT = "/home/jbhol/EEG/gits/BrainCoder"
-    DATA_BASE_DIR = "/home/jbhol/EEG/gits/NICE-EEG"
+    PROJECT_ROOT = "D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG"
+    DATA_BASE_DIR = "D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG"
     MODEL_BASE_DIR = os.path.join(PROJECT_ROOT, "model", "grok") # Base directory for saving models and checkpoints
 
     # --- Specific File/Directory Paths ---
@@ -28,7 +28,7 @@ class GlobalConfig:
     IMG_DATA_PATH = os.path.join(DATA_BASE_DIR, "dnn_feature") 
 
     # --- Wandb Settings ---
-    WANDB_PROJECT_NAME = "Transformer_VAE"
+    WANDB_PROJECT_NAME = "EEG_Domain_Adv_Things2"
     WANDB_CODE_DIR = PROJECT_ROOT # Directory containing the code to be logged
 
     # --- Other Global Settings (optional) ---
