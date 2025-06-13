@@ -38,11 +38,10 @@ BrainCoder/
 
 ## 🧠 Dataset
 
+- Things EEG2 dataset
 - EEG recordings collected while subjects viewed images.
 - Each EEG signal is paired with the corresponding **CLIP image embedding**.
-- Preprocessing steps: filtering, segmentation, normalization.
 
-(*Dataset loading scripts are available in the `dataset/` folder.*)
 
 ---
 
@@ -61,6 +60,7 @@ BrainCoder/
 - [ ] Extend to zero-shot classification using CLIP text embeddings.
 - [ ] Improve visualization of EEG feature space (e.g., t-SNE plots).
 - [ ] Add pretrained model checkpoints.
+- [ ] Add DinoV2 Embeddings.
 
 ---
 
@@ -80,4 +80,4 @@ This project is licensed under the [MIT License](LICENSE).
 ## 🙌 Acknowledgements
 
 - [OpenAI CLIP](https://github.com/openai/CLIP) for image embeddings.
-- Inspiration from research on EEG-to-vision-language alignment.
+- [NICE-EEG](https://github.com/eeyhsong/NICE-EEG) for base code and dataset setup.

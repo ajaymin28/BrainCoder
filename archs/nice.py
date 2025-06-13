@@ -160,19 +160,6 @@ class TransformerEncoderBlock(nn.Sequential):
             ))
 
 
-class TransformerEncoder(nn.Sequential):
-    def __init__(self, depth, emb_size):
-        super().__init__(*[TransformerEncoderBlock(emb_size) for _ in range(depth)])
-
-
-class FlattenHead(nn.Sequential):
-    def __init__(self, emb_size, n_classes):
-        super().__init__()
-
-    def forward(self, x):
-        x = x.contiguous().view(x.size(0), -1)
-        return x
-
 
 class ClassificationHead(nn.Sequential):
     def __init__(self):
@@ -267,6 +254,18 @@ class channel_attention(nn.Module):
 #         x = x.unsqueeze(1)
 #         return x
 
+class TransformerEncoder(nn.Sequential):
+    def __init__(self, depth, emb_size):
+        super().__init__(*[TransformerEncoderBlock(emb_size) for _ in range(depth)])
+
+
+class FlattenHead(nn.Sequential):
+    def __init__(self, emb_size, n_classes):
+        super().__init__()
+
+    def forward(self, x):
+        x = x.contiguous().view(x.size(0), -1)
+        return x
 
 class Enc_eeg(nn.Sequential):
     def __init__(self, emb_size=40, depth=3, n_classes=4, **kwargs):
