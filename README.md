@@ -60,7 +60,8 @@ BrainCoder/
 - [ ] Extend to zero-shot classification using CLIP text embeddings.
 - [ ] Improve visualization of EEG feature space (e.g., t-SNE plots).
 - [ ] Add pretrained model checkpoints.
-- [ ] Add DinoV2 Embeddings.
+- [ ] Add data prep scripts and docs.
+- [X] Add DinoV2 Embeddings.
 
 ---
 
