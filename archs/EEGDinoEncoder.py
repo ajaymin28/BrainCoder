@@ -160,3 +160,73 @@ class DINOV2EEGEncoder(nn.Module):
         features = self.encoder(x)
         proj = self.proj_head(features)
         return proj
+    
+
+class DynamicEEG2DEncoder(nn.Module):
+    def __init__(self, proj_dim=768, drop_proj=0.5):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),  # (B, 64, C, T)
+            nn.BatchNorm2d(64),
+            nn.ELU(),
+            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1), # (B, 32, C, T)
+            nn.BatchNorm2d(32),
+            nn.ELU(),
+            nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1), # (B, 16, C, T)
+            nn.BatchNorm2d(16),
+            nn.ELU(),
+            nn.Conv2d(16, 4, kernel_size=3, stride=1, padding=1), # (B, 4, C, T)
+            nn.BatchNorm2d(4),
+            nn.ELU(),
+        )
+        # Global pooling: output is always (B, 32,32)
+        self.global_pool = nn.AdaptiveAvgPool2d((32,32))  # (B, 4, 32, 32)
+        self.flatten = nn.Flatten(1)
+        self.feature_head = nn.Sequential(
+            nn.Linear(4096, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            ResidualAdd(nn.Sequential(
+                nn.GELU(),
+                nn.Linear(proj_dim, proj_dim),
+                nn.Dropout(drop_proj),
+            )),
+        )
+
+        self.Tensor = torch.cuda.FloatTensor
+        self.LongTensor = torch.cuda.LongTensor
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda()
+        self.criterion_cls = torch.nn.CrossEntropyLoss().cuda()
+
+    def nice_contrastive_loss(self, eeg_features, img_features):
+        vlabels = torch.arange(eeg_features.shape[0])
+        vlabels = vlabels.cuda().type(self.LongTensor)
+
+        eeg_features = eeg_features / eeg_features.norm(dim=1, keepdim=True)
+        img_features = img_features / img_features.norm(dim=1, keepdim=True)
+
+        logit_scale = self.logit_scale.exp()
+        logits_per_eeg = logit_scale * eeg_features @ img_features.t()
+        logits_per_img = logits_per_eeg.t()
+
+        loss_eeg = self.criterion_cls(logits_per_eeg, vlabels)
+        loss_img = self.criterion_cls(logits_per_img, vlabels)
+        loss = (loss_eeg + loss_img) / 2
+
+        return loss
+
+    def forward(self, x):
+        # x: (B, 1, C, T) with variable C and T across batches (but fixed within batch)
+        if len(x.shape)==3:
+            # batch, channel, time
+            x = x.unsqueeze(1) # add extra channel dim batch, 1, channel, time
+
+        # print("in size", x.shape)
+        z = self.encoder(x)
+        # print("encoder", z.shape)
+        z = self.global_pool(z)
+        # print("global_pool", z.shape)
+        z = self.flatten(z)
+        # print("flatten", z.shape)
+
+        z = self.feature_head(z)
+        return z

@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from utils.common import TrainConfig
 from utils.DINODatasets import DINOV2EEGDataset, eeg_global_aug, eeg_local_aug
-from archs.EEGDinoEncoder import DINOV2EEGEncoder
+from archs.EEGDinoEncoder import DINOV2EEGEncoder, DynamicEEG2DEncoder
 
 import wandb
 
@@ -171,7 +171,7 @@ class DINOHead(nn.Module):
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
-            if hasattr(m, "bias") and m.bias is not None:
+            if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
@@ -226,32 +226,52 @@ class DINOLoss(nn.Module):
         self.ncrops = ncrops
     
     def forward(self, student_output, teacher_output, epoch):
-        student_out = [F.log_softmax(s / self.student_temp, dim=-1) for s in student_output]
+
+        student_out = student_output / self.student_temp
+        student_out = student_out.chunk(self.ncrops)
+
+        # student_out = [F.log_softmax(s / self.student_temp, dim=-1) for s in student_output]
+
         teacher_temp = self.teacher_temp_schedule[min(epoch, len(self.teacher_temp_schedule)-1)]
-        teacher_out = [F.softmax((t - self.center) / teacher_temp, dim=-1).detach() for t in teacher_output]
+        teacher_out = F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
+        teacher_out = teacher_out.detach().chunk(2)
+
+        # teacher_out = [F.softmax((t - self.center) / teacher_temp, dim=-1).detach() for t in teacher_output]
         total_loss = 0
         n_loss_terms = 0
         for iq, q in enumerate(teacher_out):
             for v, s in enumerate(student_out):
                 if v == iq:
                     continue
-                loss = torch.sum(-q * s, dim=-1).mean()
-                total_loss += loss
+                loss = torch.sum(-q * F.log_softmax(s, dim=-1), dim=-1).mean()
+                total_loss += loss.mean()
                 n_loss_terms += 1
         total_loss /= n_loss_terms
-        self.update_center(torch.cat(teacher_output, dim=0))
+        self.update_center(teacher_output)
         return total_loss
     
     @torch.no_grad()
     def update_center(self, teacher_output):
-        batch_center = torch.mean(teacher_output, dim=0, keepdim=True)
+        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        batch_center = batch_center / (len(teacher_output))
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
+
+
+
+def cancel_gradients_last_layer(epoch, model, freeze_last_layer):
+    if epoch >= freeze_last_layer:
+        return
+    for n, p in model.named_parameters():
+        if "last_layer" in n:
+            p.grad = None
+
 # --- EMA Teacher Update ---
+@torch.no_grad()
 def update_teacher(student, teacher, momentum=0.996):
     with torch.no_grad():
-        for param_q, param_k in zip(student.parameters(), teacher.parameters()):
-            param_k.data = param_k.data * momentum + param_q.data * (1. - momentum)
+        for param_q, param_k in zip(student.module.parameters(), teacher.parameters()):
+            param_k.data.mul_(momentum).add_((1 - momentum) * param_q.detach().data)
 
 # --- Data Parallel/Distributed Setup ---
 def setup_distributed():
@@ -328,16 +348,23 @@ def main_worker():
     img_encoder = ImageEncoder(proj_dim=768).to(device)
     model_student = MultiModalEncoder(eeg_encoder, img_encoder).to(device)
     """
+    GLOBAL_CROPS = 2
+    LOCAL_CROPS = 4
 
     # eeg_encoder = EEGEncoder(proj_dim=768).to(device)
-    teacher_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
-    student_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
+    teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768)
+    student_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768)
+
+    # teacher_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
+    # student_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
     # img_encoder = ImageEncoder(proj_dim=768).to(device)
+
+    DINO_Head_Dim = 65536
 
     # shared head
     teacher_dino_head = DINOHead(
         in_dim=768,         # Feature dim from both encoders
-        out_dim=768,        # Embedding dim for DINO loss
+        out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
         use_bn=False,
         norm_last_layer=True,
         nlayers=3,
@@ -347,7 +374,7 @@ def main_worker():
 
     student_dino_head = DINOHead(
         in_dim=768,         # Feature dim from both encoders
-        out_dim=768,        # Embedding dim for DINO loss
+        out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
         use_bn=False,
         norm_last_layer=True,
         nlayers=3,
@@ -362,13 +389,13 @@ def main_worker():
     model_student = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=student_dino_head).to(device)
     model_teacher = MultiModalEncoder(student_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).to(device)
 
-    teacher_without_ddp = model_teacher
+    # teacher_without_ddp = model_teacher
 
     for p in model_student.parameters():
         p.requires_grad = True
 
     # # Initialize teacher with student's weights
-    teacher_without_ddp.load_state_dict(model_student.state_dict())
+    model_teacher.load_state_dict(model_student.state_dict())
 
     # Set teacher to eval mode and disable gradients
     model_teacher.eval()
@@ -395,8 +422,8 @@ def main_worker():
         subject_ids=[1,2,3],  # or [1] or up to [1,2,...,10]
         session_ids=[0,1,2,3],    # select sessions you want for train only 4 session are avialable
         subset="train",
-        n_global_crops=2,
-        n_local_crops=6,
+        n_global_crops=GLOBAL_CROPS,
+        n_local_crops=LOCAL_CROPS,
         transform_global=eeg_global_aug,
         transform_local=eeg_local_aug,
         max_cache_size=6
@@ -411,7 +438,7 @@ def main_worker():
         dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
 
     # Loss, optimizer
-    dino_loss = DINOLoss(out_dim=768, ncrops=6).to(device)
+    dino_loss = DINOLoss(out_dim=DINO_Head_Dim, ncrops=LOCAL_CROPS).to(device)
     optimizer = optim.AdamW(model_student.parameters(), lr=args.learning_rate)
 
 
@@ -472,15 +499,21 @@ def main_worker():
                     param_group["weight_decay"] = wd_schedule[it_global]
 
 
-
             # crops = [c.cuda() for c in crops]
             crops = [c.cuda(non_blocking=True) for c in crops]
-            local_crops = []
-            for c in crops:
-                local_crops.append(eeg_local_aug(c))              
             global_crops = []
-            for c in crops[:2]:
-                global_crops.append(eeg_global_aug(c))
+            local_crops = []
+            for i in range(GLOBAL_CROPS):
+                global_crops.append(eeg_global_aug(crops[0]))
+            for j in range(LOCAL_CROPS):
+                local_crops.append(eeg_local_aug(crops[0]))      
+
+            
+            # for c in crops[:2]:
+            #     global_crops.append(eeg_global_aug(c))
+            # for c in crops:
+            #     local_crops.append(eeg_local_aug(c))              
+            
             # with torch.cuda.amp.autocast():
                 
             teacher_out = model_teacher(global_crops, crop_types[:2])  # only global crops

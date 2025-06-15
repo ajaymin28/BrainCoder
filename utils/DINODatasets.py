@@ -49,7 +49,7 @@ def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_pr
         x = x.squeeze(0)  # Remove batch dim
     return x
 
-def eeg_local_aug(x, min_len=80, max_len=180, noise_std=0.05, crop_prob=1.0):
+def eeg_local_aug(x, min_len=64, max_len=100, noise_std=0.05, crop_prob=1.0):
     """
     EEG sample (channels, time) or (batch, channels, time)
     """
@@ -200,22 +200,22 @@ class DINOV2EEGDataset(Dataset):
         crops.append(torch.tensor(eeg_sample, dtype=torch.float32))
 
 
-        # ---- Now get Same-class Augmentations (across subject/session) ----
-        # same_class_augs = []
-        # List of (subject_id, session_idx) for the class
-        candidates = self.class_sample_lookup[class_idx].copy()
-        # Remove current (subject, session) to avoid duplicates
-        candidates = [(sid, sess) for (sid, sess) in candidates if not (sid == subject_id and sess == session_idx)]
-        random.shuffle(candidates)
+        # # ---- Now get Same-class Augmentations (across subject/session) ----
+        # # same_class_augs = []
+        # # List of (subject_id, session_idx) for the class
+        # candidates = self.class_sample_lookup[class_idx].copy()
+        # # Remove current (subject, session) to avoid duplicates
+        # candidates = [(sid, sess) for (sid, sess) in candidates if not (sid == subject_id and sess == session_idx)]
+        # random.shuffle(candidates)
 
-        num_augs = min(self.n_same_class_aug, len(candidates))
-        # print(num_augs, len(candidates))
-        for i in range(num_augs):
-            aug_subj, aug_sess = candidates[i]
-            aug_eeg = self._get_subject_data(aug_subj)[class_idx, aug_sess, :, :]
-            # You can use transform_global or a dedicated transform for these:
-            aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
-            crops.append(aug_crop)
+        # num_augs = min(self.n_same_class_aug, len(candidates))
+        # # print(num_augs, len(candidates))
+        # for i in range(num_augs):
+        #     aug_subj, aug_sess = candidates[i]
+        #     aug_eeg = self._get_subject_data(aug_subj)[class_idx, aug_sess, :, :]
+        #     # You can use transform_global or a dedicated transform for these:
+        #     aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
+        #     crops.append(aug_crop)
 
         return {
             "crops": crops,
