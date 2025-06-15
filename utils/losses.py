@@ -5,6 +5,31 @@ import torch.distributed as dist
 import numpy as np
 import os
 
+def cosine_scheduler(base_value, final_value, epochs, niter_per_epoch, 
+                    warmup_epochs=0, start_warmup_value=0):
+    """
+    Cosine scheduler with optional linear warmup.
+    
+    Returns a list of length epochs * niter_per_epoch.
+    """
+    warmup_schedule = []
+    if warmup_epochs > 0:
+        warmup_iters = warmup_epochs * niter_per_epoch
+        # Linear warmup from start_warmup_value to base_value
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+    else:
+        warmup_iters = 0
+
+    # Cosine schedule after warmup
+    total_iters = epochs * niter_per_epoch
+    iters = np.arange(total_iters - warmup_iters)
+    cosine_schedule = final_value + 0.5 * (base_value - final_value) * \
+        (1 + np.cos(np.pi * iters / (total_iters - warmup_iters)))
+
+    schedule = np.concatenate((warmup_schedule, cosine_schedule))
+    assert len(schedule) == total_iters
+    return schedule
+
 class Parameters:
     ce_loss_weight = 0.95
     mse_loss_weight = 0.20
