@@ -18,8 +18,8 @@ class GlobalConfig:
     """
     # --- Base Directories ---
     # Adjust these paths based on your project structure and environment
-    PROJECT_ROOT = "D:\\Datasets\\EEG DATASET\\things2\\BrainCoder\\dump"
-    DATA_BASE_DIR = "D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG"
+    PROJECT_ROOT = "/home/ja882177/EEG/gits/BrainCoder"
+    DATA_BASE_DIR = "/home/ja882177/EEG/gits/NICE-EEG"
     MODEL_BASE_DIR = os.path.join(PROJECT_ROOT, "model", "grok") # Base directory for saving models and checkpoints
 
     # --- Specific File/Directory Paths ---

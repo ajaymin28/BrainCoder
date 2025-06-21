@@ -9,7 +9,8 @@ import gc # Import gc for garbage collection
 # Assuming these paths are defined elsewhere in your project
 # from utils.eeg_utils import EEG_DATA_PATH, IMG_DATA_PATH, TEST_CENTER_PATH
 # For this standalone code block, let's define placeholders if they aren't available
-from utils.common import TrainConfig, memory_stats
+from utils.common import TrainConfig
+from utils.gpu_utils import memory_stats
 try:
     from utils.eeg_utils import EEG_DATA_PATH, IMG_DATA_PATH, TEST_CENTER_PATH
 except ImportError:

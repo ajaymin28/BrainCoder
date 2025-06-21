@@ -8,7 +8,7 @@ from collections import OrderedDict
 from utils.common import TrainConfig
 from collections import defaultdict
 
-def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_prob=0.2):
+def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_prob=0.2, min_len=100, max_len=225, crop_prob=1.0):
     """
     EEG sample (channels, time) or (batch, channels, time)
     """
@@ -17,25 +17,35 @@ def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_pr
     if not is_batch:
         x = x.unsqueeze(0)  # Add batch dim: (1, C, T)
 
+    t = x.shape[-1]
+    c = x.shape[1]
+
+    # 1. Random Temporal Crop
+    crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
+    if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
+        if t - crop_len + 1 > 0:
+            start = torch.randint(0, t - crop_len + 1, (1,)).item()
+            x = x[:, :, start:start+crop_len]
+
     # 1. Additive Gaussian Noise
     if torch.rand(1) < 0.7:
         x = x + torch.randn_like(x) * noise_std
 
-    # 2. Channel Dropout
-    if torch.rand(1) < 0.5:
-        # mask shape: (channels,)
-        mask = (torch.rand(x.shape[1], device=x.device) > mask_prob).float()
-        x = x * mask.unsqueeze(0).unsqueeze(-1)
+    # # 2. Channel Dropout
+    # if torch.rand(1) < 0.5:
+    #     # mask shape: (channels,)
+    #     mask = (torch.rand(x.shape[1], device=x.device) > mask_prob).float()
+    #     x = x * mask.unsqueeze(0).unsqueeze(-1)
 
-    # 3. Time Jitter (random roll)
-    if torch.rand(1) < jitter_prob:
-        shift = torch.randint(-15, 16, (1,)).item()
-        x = torch.roll(x, shifts=shift, dims=-1)
+    # # 3. Time Jitter (random roll)
+    # if torch.rand(1) < jitter_prob:
+    #     shift = torch.randint(-15, 16, (1,)).item()
+    #     x = torch.roll(x, shifts=shift, dims=-1)
 
-    # 4. Channel-wise Scaling (multiplicative noise)
-    if torch.rand(1) < scaling_prob:
-        scale = 1.0 + (torch.randn(x.shape[1], device=x.device) * 0.1)
-        x = x * scale.unsqueeze(0).unsqueeze(-1)
+    # # 4. Channel-wise Scaling (multiplicative noise)
+    # if torch.rand(1) < scaling_prob:
+    #     scale = 1.0 + (torch.randn(x.shape[1], device=x.device) * 0.1)
+    #     x = x * scale.unsqueeze(0).unsqueeze(-1)
 
     # 5. Random Temporal Masking
     if torch.rand(1) < 0.5:
@@ -72,10 +82,10 @@ def eeg_local_aug(x, min_len=64, max_len=100, noise_std=0.05, crop_prob=1.0):
     if torch.rand(1) < 0.7:
         x = x + torch.randn_like(x) * noise_std
 
-    # 3. Small Channel Scaling
-    if torch.rand(1) < 0.5:
-        scale = 1.0 + (torch.randn(c, device=x.device) * 0.05)
-        x = x * scale.unsqueeze(0).unsqueeze(-1)
+    # # 3. Small Channel Scaling
+    # if torch.rand(1) < 0.5:
+    #     scale = 1.0 + (torch.randn(c, device=x.device) * 0.05)
+    #     x = x * scale.unsqueeze(0).unsqueeze(-1)
 
     if not is_batch:
         x = x.squeeze(0)
