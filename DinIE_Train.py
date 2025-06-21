@@ -30,57 +30,59 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from utils.common import TrainConfig
-from utils.DINODatasets import DINOV2EEGDataset, eeg_global_aug, eeg_local_aug
+from utils.DINODatasets import DINOV2EEGDataset,DINOV2EEGDatasetKaggle, eeg_global_aug, eeg_local_aug
 from archs.EEGDinoEncoder import DINOV2EEGEncoder, DynamicEEG2DEncoder
+from utils.logman import logger
+from utils.gpu_utils import memory_stats
 
 import wandb
 
-def load_model_for_inference(ckpt_path, eeg_encoder, img_encoder, device='cuda'):
-    # Load your encoders
-    model = MultiModalEncoder(eeg_encoder, img_encoder).to(device)
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt['model_student'])
-    model.eval()
-    return model
+# def load_model_for_inference(ckpt_path, eeg_encoder, img_encoder, device='cuda'):
+#     # Load your encoders
+#     model = MultiModalEncoder(eeg_encoder, img_encoder).to(device)
+#     ckpt = torch.load(ckpt_path, map_location=device)
+#     model.load_state_dict(ckpt['model_student'])
+#     model.eval()
+#     return model
 
-def extract_features(model, input_data, input_type='eeg', batch_size=32, device='cuda'):
-    """
-    input_data: torch.Tensor or list of tensors (EEG: [B, C, T], IMG: [B, 3, H, W])
-    input_type: 'eeg' or 'img'
-    Returns: features [N, feat_dim]
+# def extract_features(model, input_data, input_type='eeg', batch_size=32, device='cuda'):
+#     """
+#     input_data: torch.Tensor or list of tensors (EEG: [B, C, T], IMG: [B, 3, H, W])
+#     input_type: 'eeg' or 'img'
+#     Returns: features [N, feat_dim]
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    eeg_encoder = EEGEncoder(proj_dim=768).to(device)
-    img_encoder = ImageEncoder(proj_dim=768).to(device)
-    model = load_model_for_inference('dinov2_ckpt_epoch90.pth', eeg_encoder, img_encoder, device)
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     eeg_encoder = EEGEncoder(proj_dim=768).to(device)
+#     img_encoder = ImageEncoder(proj_dim=768).to(device)
+#     model = load_model_for_inference('dinov2_ckpt_epoch90.pth', eeg_encoder, img_encoder, device)
 
-    # Suppose you have eeg_data: [N, C, T]
-    eeg_features = extract_features(model, eeg_data, input_type='eeg', batch_size=64, device=device)
-    print(eeg_features.shape)  # (N, 768)
+#     # Suppose you have eeg_data: [N, C, T]
+#     eeg_features = extract_features(model, eeg_data, input_type='eeg', batch_size=64, device=device)
+#     print(eeg_features.shape)  # (N, 768)
 
-    img_features = extract_features(model, img_data, input_type='img', batch_size=64, device=device)
-    print(img_features.shape)  # (N, 768)
+#     img_features = extract_features(model, img_data, input_type='img', batch_size=64, device=device)
+#     print(img_features.shape)  # (N, 768)
 
 
-    """
-    features = []
-    model.eval()
-    with torch.no_grad():
-        if isinstance(input_data, list):
-            # list of tensors (chunks/batches)
-            for crop in input_data:
-                crop = crop.to(device)
-                out = model([crop], [input_type])[0]  # [B, feat_dim]
-                features.append(out.cpu())
-        else:
-            # single big tensor, slice in batches
-            N = input_data.shape[0]
-            for i in range(0, N, batch_size):
-                batch = input_data[i:i+batch_size].to(device)
-                out = model([batch], [input_type])[0]
-                features.append(out.cpu())
-    features = torch.cat(features, dim=0)
-    return features  # [N, feat_dim]
+#     """
+#     features = []
+#     model.eval()
+#     with torch.no_grad():
+#         if isinstance(input_data, list):
+#             # list of tensors (chunks/batches)
+#             for crop in input_data:
+#                 crop = crop.to(device)
+#                 out = model([crop], [input_type])[0]  # [B, feat_dim]
+#                 features.append(out.cpu())
+#         else:
+#             # single big tensor, slice in batches
+#             N = input_data.shape[0]
+#             for i in range(0, N, batch_size):
+#                 batch = input_data[i:i+batch_size].to(device)
+#                 out = model([batch], [input_type])[0]
+#                 features.append(out.cpu())
+#     features = torch.cat(features, dim=0)
+#     return features  # [N, feat_dim]
 
 
 def config_to_dict(obj):
@@ -140,7 +142,7 @@ def trunc_normal_(tensor, mean=0., std=1.):
 
 class DINOHead(nn.Module):
     def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True,
-                 nlayers=3, hidden_dim=2048, bottleneck_dim=256):
+                 nlayers=3, hidden_dim=2048, bottleneck_dim=65536):
         super().__init__()
         nlayers = max(nlayers, 1)
         if nlayers == 1:
@@ -211,10 +213,10 @@ class MultiModalEncoder(nn.Module):
             outs.append(out)
         return outs
 
-# --- DINOv2 Loss ---
+# --- DINO Loss ---
 class DINOLoss(nn.Module):
     def __init__(self, out_dim, ncrops, warmup_teacher_temp=0.04, teacher_temp=0.07,
-                 warmup_epochs=30, nepochs=100, student_temp=0.1, center_momentum=0.9):
+                 warmup_epochs=30, nepochs=100, student_temp=0.1, center_momentum=0.996):
         super().__init__()
         self.student_temp = student_temp
         self.center_momentum = center_momentum
@@ -227,16 +229,16 @@ class DINOLoss(nn.Module):
     
     def forward(self, student_output, teacher_output, epoch):
 
-        student_out = student_output / self.student_temp
+        student_out = [so / self.student_temp for so in student_output]
+        student_out = torch.stack(student_out)
         student_out = student_out.chunk(self.ncrops)
 
-        # student_out = [F.log_softmax(s / self.student_temp, dim=-1) for s in student_output]
-
         teacher_temp = self.teacher_temp_schedule[min(epoch, len(self.teacher_temp_schedule)-1)]
-        teacher_out = F.softmax((teacher_output - self.center) / teacher_temp, dim=-1)
-        teacher_out = teacher_out.detach().chunk(2)
+        # teacher_out = [F.softmax((tout - self.center) / teacher_temp, dim=-1).detach() for tout in teacher_output]
+        teacher_out = torch.stack(teacher_out)
+        teacher_out = F.softmax((teacher_out - self.center) / teacher_temp, dim=-1)
+        teacher_out = teacher_out.chunk(2)
 
-        # teacher_out = [F.softmax((t - self.center) / teacher_temp, dim=-1).detach() for t in teacher_output]
         total_loss = 0
         n_loss_terms = 0
         for iq, q in enumerate(teacher_out):
@@ -252,8 +254,10 @@ class DINOLoss(nn.Module):
     
     @torch.no_grad()
     def update_center(self, teacher_output):
-        batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
-        batch_center = batch_center / (len(teacher_output))
+        teacher_output = torch.stack(teacher_output, dim=0)
+        teacher_output = teacher_output.view(-1, teacher_output.size(-1))
+        batch_center = torch.mean(teacher_output, dim=0, keepdim=True)
+        # batch_center = batch_center / len(teacher_output)
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 
@@ -269,8 +273,10 @@ def cancel_gradients_last_layer(epoch, model, freeze_last_layer):
 # --- EMA Teacher Update ---
 @torch.no_grad()
 def update_teacher(student, teacher, momentum=0.996):
+    student_mod = student.module if hasattr(student, 'module') else student
+    teacher_mod = teacher.module if hasattr(teacher, 'module') else teacher
     with torch.no_grad():
-        for param_q, param_k in zip(student.module.parameters(), teacher.parameters()):
+        for param_q, param_k in zip(student_mod.parameters(), teacher_mod.parameters()):
             param_k.data.mul_(momentum).add_((1 - momentum) * param_q.detach().data)
 
 # --- Data Parallel/Distributed Setup ---
@@ -350,6 +356,7 @@ def main_worker():
     """
     GLOBAL_CROPS = 2
     LOCAL_CROPS = 4
+    MIXED_PREC_TRAINING = True
 
     # eeg_encoder = EEGEncoder(proj_dim=768).to(device)
     teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768)
@@ -361,9 +368,9 @@ def main_worker():
 
     DINO_Head_Dim = 65536
 
-    # shared head
+    # head
     teacher_dino_head = DINOHead(
-        in_dim=768,         # Feature dim from both encoders
+        in_dim=768,                   # Feature dim from both encoders
         out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
         use_bn=False,
         norm_last_layer=True,
@@ -373,7 +380,7 @@ def main_worker():
     )
 
     student_dino_head = DINOHead(
-        in_dim=768,         # Feature dim from both encoders
+        in_dim=768,                   # Feature dim from both encoders
         out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
         use_bn=False,
         norm_last_layer=True,
@@ -384,12 +391,8 @@ def main_worker():
 
     from utils.losses import cosine_scheduler
 
-
-
     model_student = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=student_dino_head).to(device)
     model_teacher = MultiModalEncoder(student_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).to(device)
-
-    # teacher_without_ddp = model_teacher
 
     for p in model_student.parameters():
         p.requires_grad = True
@@ -409,18 +412,18 @@ def main_worker():
 
     # Dataset, Sampler, DataLoader
     args = TrainConfig()
-
     args.global_config.WANDB_PROJECT_NAME = "DinIE"
-
-    args.batch_size = 512
+    args.batch_size = 128
     args.learning_rate = 5e-4
     args.local_epochs = 100
 
 
+
+
     dataset = DINOV2EEGDataset(
         args=args,
-        subject_ids=[1,2,3],  # or [1] or up to [1,2,...,10]
-        session_ids=[0,1,2,3],    # select sessions you want for train only 4 session are avialable
+        subject_ids=[1],  # or [1] or up to [1,2,...,10]
+        session_ids=[0,1],    # select sessions you want for train only 4 session are avialable
         subset="train",
         n_global_crops=GLOBAL_CROPS,
         n_local_crops=LOCAL_CROPS,
@@ -486,9 +489,10 @@ def main_worker():
         model_student.train()
         model_teacher.eval()
 
-        for it, batch in enumerate(dataloader):
+        torch.cuda.reset_peak_memory_stats("cuda") 
+        for it, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
             crops = batch['crops']
-            crop_types = ['eeg'] * len(crops) # all eeg here for img pass img string for respective sample index
+            # crop_types = ['eeg'] * len(crops) # all eeg here for img pass img string for respective sample index
             # crop_types = batch['crop_types']
             it_global = epoch * len(dataloader) + it
 
@@ -498,7 +502,6 @@ def main_worker():
                 if i == 0:
                     param_group["weight_decay"] = wd_schedule[it_global]
 
-
             # crops = [c.cuda() for c in crops]
             crops = [c.cuda(non_blocking=True) for c in crops]
             global_crops = []
@@ -506,26 +509,26 @@ def main_worker():
             for i in range(GLOBAL_CROPS):
                 global_crops.append(eeg_global_aug(crops[0]))
             for j in range(LOCAL_CROPS):
-                local_crops.append(eeg_local_aug(crops[0]))      
+                local_crops.append(eeg_local_aug(crops[0]))     
 
-            
-            # for c in crops[:2]:
-            #     global_crops.append(eeg_global_aug(c))
-            # for c in crops:
-            #     local_crops.append(eeg_local_aug(c))              
-            
-            # with torch.cuda.amp.autocast():
-                
-            teacher_out = model_teacher(global_crops, crop_types[:2])  # only global crops
-            student_out = model_student(local_crops, crop_types)
-            loss = dino_loss(student_out, teacher_out, epoch)
+            if MIXED_PREC_TRAINING:
+                with torch.amp.autocast(device_type="cuda"):
+                    teacher_out = model_teacher(global_crops, ['eeg'] * len(global_crops))  # only global crops
+                    student_out = model_student(local_crops,  ['eeg'] * len(local_crops))
+                    loss = dino_loss(student_out, teacher_out, epoch)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            # scaler.scale(loss).backward()
-            # scaler.step(optimizer)
-            # scaler.update()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update() 
+            else:    
+                teacher_out = model_teacher(global_crops, ['eeg'] * len(global_crops))  # only global crops
+                student_out = model_student(local_crops,  ['eeg'] * len(local_crops))
+                loss = dino_loss(student_out, teacher_out, epoch)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
             m = momentum_schedule[it_global]
             update_teacher(model_student, model_teacher,momentum=m)
 
@@ -535,29 +538,50 @@ def main_worker():
                 loss = loss / dist.get_world_size()
 
         if local_rank == 0:
-            print(f"Epoch {epoch}: Loss {loss.item():.4f}")
-            print("Student out mean/std", student_out[0].mean().item(), student_out[0].std().item())
-            print("Teacher out mean/std", teacher_out[0].mean().item(), teacher_out[0].std().item())
-            print("LR", optimizer.param_groups[0]["lr"])
-            print("Center mean", dino_loss.center.mean().item(), "std", dino_loss.center.std().item())
+            logger.info(f"Epoch {epoch}: Loss {loss.item():.4f}")
+            logger.info("Student out mean/std", student_out[0].mean().item(), student_out[0].std().item())
+            logger.info("Teacher out mean/std", teacher_out[0].mean().item(), teacher_out[0].std().item())
+            logger.info("LR", optimizer.param_groups[0]["lr"])
+            logger.info("Center mean", dino_loss.center.mean().item(), "std", dino_loss.center.std().item())
+
+            mem_stat_dict = memory_stats(get_dict=True)
 
             wandb.log({
                     "Epoch": epoch if epoch>0 else 1,
-                    "loss": loss,
+                
+                    "train/loss": loss,
+                    "train/learning_rate": optimizer.param_groups[0]["lr"],
+                    
+                    "centers/center_mean": dino_loss.center.mean().item(),
+                    "centers/center_std": dino_loss.center.std().item(),
+                    "centers/student_mean": student_out[0].mean().item(),
+                    "centers/student_std": student_out[0].std().item(),
+                    "centers/teacher_mean": teacher_out[0].mean().item(),
+                    "centers/teacher_std": teacher_out[0].std().item(),
+                
+                    "resources_stats/": mem_stat_dict
             })
 
 
         if (not is_ddp() and epoch % 10 == 0) or (is_ddp() and local_rank == 0 and epoch % 10 == 0):
-            student_to_save = model_student.module if hasattr(model_student, 'module') else model_student
-            checkpoint = {
-                'epoch': epoch,
-                'model_student': student_to_save.state_dict(),
-                'model_teacher': (model_teacher.module if hasattr(model_teacher, 'module') else model_teacher).state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'scaler': scaler.state_dict(),
-            }
-            torch.save(checkpoint, f"dinov2_ckpt_epoch{epoch}.pth")
-            print(f"Checkpoint saved at epoch {epoch}")
+            # student_to_save = model_student.module if hasattr(model_student, 'modules') else model_student
+            
+
+            if loss < best_loss:
+                best_loss = loss
+
+                student_to_save = model_student.module if hasattr(model_student, 'module') else model_student
+                teacher_to_save = model_teacher.module if hasattr(model_teacher, 'module') else model_teacher
+
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_student': student_to_save.state_dict(),
+                    'model_teacher': teacher_to_save.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
+                }
+                torch.save(checkpoint, f"dinov2_ckpt_epoch{epoch}.pth")
+                logger.info(f"Checkpoint saved at epoch {epoch}")
 
     cleanup_ddp()
 

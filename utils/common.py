@@ -18,8 +18,8 @@ class GlobalConfig:
     """
     # --- Base Directories ---
     # Adjust these paths based on your project structure and environment
-    PROJECT_ROOT = "/home/ja882177/EEG/gits/BrainCoder"
-    DATA_BASE_DIR = "/home/ja882177/EEG/gits/NICE-EEG"
+    PROJECT_ROOT = "D:\\Datasets\\EEG DATASET\\things2\\BrainCoder\\dump"
+    DATA_BASE_DIR = "D:\\Datasets\\EEG DATASET\\things2\\NICE-EEG"
     MODEL_BASE_DIR = os.path.join(PROJECT_ROOT, "model", "grok") # Base directory for saving models and checkpoints
 
     # --- Specific File/Directory Paths ---
@@ -250,44 +250,6 @@ if __name__ == "__main__":
 
     # Load the checkpoint
     manager.load_checkpoint(model, optimizer, epoch=1)
-
-import os
-import psutil
-
-def memory_stats(get_dict=False, print_mem_usage=True):
-    try:
-        freeMem, total  = torch.cuda.mem_get_info()
-        total = total/1024**2
-        freeMem = freeMem/1024**2
-    except:
-        freeMem = 0
-        total = 0
-
-    try:
-        cuda_allocated = torch.cuda.memory_allocated()/1024**2
-        cuda_reserved = torch.cuda.memory_reserved()/1024**2
-    except:
-        cuda_allocated = 0
-        cuda_reserved = 0
-
-    process = psutil.Process(os.getpid())
-    ram_mem_perc = process.memory_percent()
-    cpu_usage = psutil.cpu_percent()
-
-    if print_mem_usage:
-        print(f"CPU: {cpu_usage:.2f}% RAM: {ram_mem_perc:.2f}% GPU memory Total: [{total:.2f}] Available: [{freeMem:.2f}] Allocated: [{cuda_allocated:.2f}] Reserved: [{cuda_reserved:.2f}]")
-
-    if get_dict:
-        return {
-            "cpu": cpu_usage,
-            "ram": ram_mem_perc,
-            "cuda_free": freeMem,
-            "cuda_total": total,
-            "cuda_allocated": round(cuda_allocated,2),
-            "cuda_reserved": round(cuda_reserved,2),
-        }
-    
-memory_stats()
 
 
 def tryDel(obj_name):

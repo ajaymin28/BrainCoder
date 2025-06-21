@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
+import numpy as np
 
 # --- EEG Encoder with global pooling ---
 class ResidualAdd(nn.Module):

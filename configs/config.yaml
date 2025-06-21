@@ -1,0 +1,26 @@
+dataset_id: "ariG23498/license-detection-paligemma"
+# model_id: "google/gemma-3-4b-pt" # "unsloth/gemma-3-4b-it" 
+model_id:  "unsloth/gemma-3-4b-it" 
+checkpoint_id: "ajaymin28/Gemma3_ObjeDet_unsloth_qlora_500steps"
+
+device: "cuda"
+dtype: "bfloat16"
+
+batch_size: 32
+learning_rate: 2e-5
+epochs: 1
+max_step_to_train: 500
+validate_steps_freq: 50
+
+finetune_method: "qlora"   # FFT | lora | qlora
+use_unsloth: true
+
+
+mm_tunable_parts:
+  - no_exist_layer   # basically not finetuning any base components
+  # - mlp
+  # - multi_modal_projector
+  # - vision_tower
+  # - language_model
+wandb_project_name:  "Gemma3_LoRA"
+push_model_to_hub: true
