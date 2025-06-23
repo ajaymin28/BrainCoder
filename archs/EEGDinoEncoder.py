@@ -164,25 +164,53 @@ class DINOV2EEGEncoder(nn.Module):
 class DynamicEEG2DEncoder(nn.Module):
     def __init__(self, proj_dim=768, drop_proj=0.5):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),  # (B, 64, C, T)
-            nn.BatchNorm2d(64),
-            nn.ELU(),
-            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1), # (B, 32, C, T)
-            nn.BatchNorm2d(32),
-            nn.ELU(),
-            nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1), # (B, 16, C, T)
-            nn.BatchNorm2d(16),
-            nn.ELU(),
-            nn.Conv2d(16, 4, kernel_size=3, stride=1, padding=1), # (B, 4, C, T)
-            nn.BatchNorm2d(4),
-            nn.ELU(),
+        # self.encoder = nn.Sequential(
+        #     nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),  # (B, 64, C, T)
+        #     nn.BatchNorm2d(64),
+        #     nn.ELU(),
+        #     nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1), # (B, 32, C, T)
+        #     nn.BatchNorm2d(32),
+        #     nn.ELU(),
+        #     nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1), # (B, 16, C, T)
+        #     nn.BatchNorm2d(16),
+        #     nn.ELU(),
+        #     nn.Conv2d(16, 8, kernel_size=3, stride=1, padding=1), # (B, 4, C, T)
+        #     nn.BatchNorm2d(8),
+        #     nn.ELU(),
+        # )
+        # # Global pooling: output is always (B, 32,32)
+        # self.global_pool = nn.AdaptiveAvgPool2d((63,100))  # (B, 4, 63, 100)
+
+        # FROM THE NICE Paper but customized for 63,100 input and needed output (32,32)
+        # self.tsconv = nn.Sequential(
+        #     nn.Conv2d(1, 40, (1, 25), (1, 1)),
+        #     nn.AvgPool2d((1, 51), (1, 5)),
+        #     nn.BatchNorm2d(40),
+        #     nn.ELU(),
+        #     nn.Conv2d(40, 40, (63, 1), (1, 1)),
+        #     nn.BatchNorm2d(40),
+        #     nn.ELU(),
+        #     nn.Dropout(0.5),
+        # )
+        
+
+        # Input shape: (2, 1, 63, 250)
+        self.tsconv = nn.Sequential(
+            nn.Conv2d(1, 64, (1, 8), (1, 1)),   # torch.Size([2, 64, 63, 243])
+            nn.BatchNorm2d(64),                 # torch.Size([2, 64, 63, 243])
+            nn.ELU(),                           # torch.Size([2, 64, 63, 243])
+            nn.AvgPool2d((1, 25), (1, 2)),      # torch.Size([2, 64, 63, 110])
+
+            nn.Conv2d(64, 40, (32, 1), (1, 1)), # torch.Size([2, 32, 14, 107])  
+            nn.BatchNorm2d(40),                 # torch.Size([2, 32, 14, 107])
+            nn.ELU(),                           # torch.Size([2, 32, 14, 107])
+            nn.Dropout(0.5),                    # torch.Size([2, 32, 14, 107])
         )
-        # Global pooling: output is always (B, 32,32)
-        self.global_pool = nn.AdaptiveAvgPool2d((32,32))  # (B, 4, 32, 32)
+
+        self.global_pool = nn.AdaptiveAvgPool2d((4,32))  # Pool (B, filters, 10, 32)
         self.flatten = nn.Flatten(1)
         self.feature_head = nn.Sequential(
-            nn.Linear(4096, proj_dim),
+            nn.Linear(5120, proj_dim),
             nn.BatchNorm1d(proj_dim),
             ResidualAdd(nn.Sequential(
                 nn.GELU(),
@@ -190,6 +218,66 @@ class DynamicEEG2DEncoder(nn.Module):
                 nn.Dropout(drop_proj),
             )),
         )
+
+
+
+        # self.encoder = nn.Sequential(
+        #     nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),  # (B, 64, C, T)
+        #     nn.BatchNorm2d(64),
+        #     nn.ELU(),
+        #     nn.AdaptiveAvgPool2d((64,128)),
+        #     nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1), # (B, 32, C, T)
+        #     nn.BatchNorm2d(32),
+        #     nn.ELU(),
+        #     nn.AdaptiveAvgPool2d((32,64)),
+        #     nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1), # (B, 16, C, T)
+        #     nn.BatchNorm2d(16),
+        #     nn.ELU(),
+        #     nn.AdaptiveAvgPool2d((32,32)),
+        #     nn.Conv2d(16, 4, kernel_size=3, stride=1, padding=1), # (B, 4, C, T)
+        #     nn.BatchNorm2d(4),
+        #     nn.ELU(),
+        #     nn.AdaptiveAvgPool2d((32,32))
+        # )
+        # print(self.encoder)
+
+        
+        # self.flatten = nn.Flatten(1)
+        # self.feature_head = nn.Sequential(
+        #     nn.Linear(8448, proj_dim),
+        #     nn.BatchNorm1d(proj_dim),
+        #     ResidualAdd(nn.Sequential(
+        #         nn.GELU(),
+        #         nn.Linear(proj_dim, proj_dim),
+        #         nn.Dropout(drop_proj),
+        #     )),
+        # )
+
+       
+        # # Experimental
+        # self.tsconv = nn.Sequential(
+        #     nn.Conv2d(1, 64, (1, 3), (1, 1)), 
+        #     nn.BatchNorm2d(64),
+        #     nn.ELU(),
+        #     nn.AvgPool2d((1, 2), (1, 3)),
+        #     nn.Conv2d(64, 128, (32, 1), (1, 1)),
+        #     nn.BatchNorm2d(128),
+        #     nn.ELU(),
+        #     nn.Dropout(0.5),
+        #     nn.Conv2d(128, 256, (32, 1), (1, 1)),
+        #     nn.BatchNorm2d(256),
+        #     nn.ELU(),
+        #     nn.Dropout(0.5),
+        # )
+        # self.feature_head = nn.Sequential(
+        #     nn.Linear(256, proj_dim),
+        #     nn.BatchNorm1d(proj_dim),
+        #     ResidualAdd(nn.Sequential(
+        #         nn.GELU(),
+        #         nn.Linear(proj_dim, proj_dim),
+        #         nn.Dropout(drop_proj),
+        #     )),
+        # )
 
         self.Tensor = torch.cuda.FloatTensor
         self.LongTensor = torch.cuda.LongTensor
@@ -219,13 +307,25 @@ class DynamicEEG2DEncoder(nn.Module):
             # batch, channel, time
             x = x.unsqueeze(1) # add extra channel dim batch, 1, channel, time
 
-        # print("in size", x.shape)
-        z = self.encoder(x)
-        # print("encoder", z.shape)
+        # print("x", x.shape)
+        z = self.tsconv(x)
+        # print("tsconv", z.shape)
         z = self.global_pool(z)
         # print("global_pool", z.shape)
         z = self.flatten(z)
         # print("flatten", z.shape)
-
         z = self.feature_head(z)
+        # print("feature_head", z.shape)
+        
+        # print("in size", x.shape)
+        # z = self.encoder(x)
+        # print("encoder", z.shape)
+        # z = self.global_pool(z)
+        # print("global_pool", z.shape)
+        # z = self.tsconv(z)
+        # print("tsconv", z.shape)
+        # z = self.flatten(z)
+        # print("flatten", z.shape)
+        # z = self.feature_head(z)
+        # print("feature_head", z.shape)
         return z

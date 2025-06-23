@@ -184,7 +184,7 @@ class DINOHead(nn.Module):
 
 # --- Shared Multi-modal Wrapper ---
 class MultiModalEncoder(nn.Module):
-    def __init__(self, eeg_encoder, img_encoder, dino_head):
+    def __init__(self, eeg_encoder, img_encoder, dino_head=None):
         super().__init__()
         self.eeg_encoder = eeg_encoder
         self.img_encoder = img_encoder
@@ -209,8 +209,13 @@ class MultiModalEncoder(nn.Module):
                 feat = self.img_encoder(crop)
             else:
                 raise ValueError(f"Unknown crop type: {ctype}")
-            out = self.dino_head(feat)
-            outs.append(out)
+            
+            if self.dino_head is not None: # in case of aligning with image feature we dont need dino Head, instead we use base encoder and attach a seperate alignment head
+                out = self.dino_head(feat)
+                outs.append(out)
+            else:
+                outs.append(feat)
+
         return outs
 
 # --- DINO Loss ---
@@ -226,9 +231,6 @@ class DINOLoss(nn.Module):
             np.ones(nepochs - warmup_epochs) * teacher_temp
         ))
         self.ncrops = ncrops
-    
-    def getCurrentTemp(self, epoch):
-        return self.teacher_temp_schedule[min(epoch, len(self.teacher_temp_schedule)-1)]
     
     def forward(self, student_output, teacher_output, epoch):
 
@@ -262,9 +264,6 @@ class DINOLoss(nn.Module):
         teacher_output = teacher_output.view(-1, teacher_output.size(-1))
         batch_center = torch.mean(teacher_output, dim=0, keepdim=True)
         # batch_center = batch_center / len(teacher_output)
-        if torch.isnan(batch_center).any():
-            logger.info("NaN detected in batch_center. Skipping center update!")
-            return
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
 
@@ -283,6 +282,37 @@ def setup_distributed():
     if 'RANK' in os.environ:
         torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
         dist.init_process_group(backend='nccl')
+
+# --- Training Loop ---
+def train_dino(model_student, model_teacher, dino_loss, dataloader, optimizer, device, 
+              epochs=100, ncrops=6, local_rank=0, is_ddp=False, use_amp=False):
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    for epoch in range(epochs):
+        model_student.train()
+        model_teacher.eval()
+        if is_ddp:
+            dataloader.sampler.set_epoch(epoch)
+        for batch in dataloader:
+            # batch: List[Tensor], each is a crop (B, ...)
+            crops = batch['crops']  # list of tensors
+            crop_types = batch['crop_types'] if 'crop_types' in batch else None
+            # Forward student and teacher
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                student_out = model_student(crops, crop_types)  # list of (B, D)
+                with torch.no_grad():
+                    teacher_out = model_teacher(crops[:2], crop_types[:2] if crop_types else None)  # only global crops
+                loss = dino_loss(student_out, teacher_out, epoch)
+            optimizer.zero_grad()
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+            update_teacher(model_student, model_teacher)
+        if local_rank == 0 or not is_ddp:
+            print(f"Epoch {epoch}: Loss {loss.item():.4f}")
 
 def cancel_gradients_last_layer(epoch, model, freeze_last_layer):
     if epoch >= freeze_last_layer:
@@ -309,16 +339,6 @@ def is_dist_avail_and_initialized():
         return False
     return True
 
-import torch.nn.init as init
-def weights_init_normal(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        init.normal_(m.weight.data, 0.0, 0.02)
-    elif classname.find('Linear') != -1:
-        init.normal_(m.weight.data, 0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        init.normal_(m.weight.data, 1.0, 0.02)
-        init.constant_(m.bias.data, 0.0)
 
 def get_world_size():
     if not is_dist_avail_and_initialized():
@@ -348,41 +368,11 @@ def main_worker():
     img_encoder = ImageEncoder(proj_dim=768).to(device)
     model_student = MultiModalEncoder(eeg_encoder, img_encoder).to(device)
     """
-
-    class HyperParams:
-
-        batch_size = 3000
-        epochs = 100
-
-        GLOBAL_CROPS = 2
-        LOCAL_CROPS = 4
-        MIXED_PREC_TRAINING = True
-        freeze_last_layer = 1
-        clip_grad = 1.0
-
-        DINO_Head_Dim = 8192
-        DINO_Head_bottleneck_dim = 256
-        DINO_Head_hidden_dim = 2048
-        DINO_Head_nlayers = 3
-        DINO_Head_norm_last_layer = False  # in orginal False with vit_small and True with vit_base.
-        DINO_Head_use_bn = False
-
-        learning_rate = 5e-4
-        learning_rate_warmpup_epochs = 10
-        learning_rate_final = 1e-6
-
-        warmup_teacher_temp=0.04
-        teacher_temp=0.07
-        warmup_teacher_temp_epochs=30  # 0.07 --> 0.2 over 30 epochs
-        student_temp=0.2
-        center_momentum=0.996   # higher for smaller batches i.e 0.9995 scheduled to being 1.0 by end of the training
-
-        wd_base_value=0.04
-        wd_final_value=0.4
-    
-        momentum_base_value=0.996
-        momentum_final_value=1.0
-
+    GLOBAL_CROPS = 2
+    LOCAL_CROPS = 4
+    MIXED_PREC_TRAINING = True
+    freeze_last_layer = 1
+    clip_grad = 3
 
     # eeg_encoder = EEGEncoder(proj_dim=768).to(device)
     teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768)
@@ -392,37 +382,33 @@ def main_worker():
     # student_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
     # img_encoder = ImageEncoder(proj_dim=768).to(device)
 
-    
+    DINO_Head_Dim = 65536
 
     # head
-    # default args in dino (in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
     teacher_dino_head = DINOHead(
         in_dim=768,                   # Feature dim from both encoders
-        out_dim=HyperParams.DINO_Head_Dim,        # Embedding dim for DINO loss
-        use_bn=HyperParams.DINO_Head_use_bn,
-        norm_last_layer=HyperParams.DINO_Head_norm_last_layer,
-        nlayers=HyperParams.DINO_Head_nlayers,
-        hidden_dim=HyperParams.DINO_Head_hidden_dim,
-        bottleneck_dim=HyperParams.DINO_Head_bottleneck_dim
+        out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
+        use_bn=False,
+        norm_last_layer=True,
+        nlayers=3,
+        hidden_dim=2048,
+        bottleneck_dim=256
     )
 
     student_dino_head = DINOHead(
         in_dim=768,                   # Feature dim from both encoders
-        out_dim=HyperParams.DINO_Head_Dim,        # Embedding dim for DINO loss
-        use_bn=HyperParams.DINO_Head_use_bn,
-        norm_last_layer=HyperParams.DINO_Head_norm_last_layer,
-        nlayers=HyperParams.DINO_Head_nlayers,
-        hidden_dim=HyperParams.DINO_Head_hidden_dim,
-        bottleneck_dim=HyperParams.DINO_Head_bottleneck_dim
+        out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
+        use_bn=False,
+        norm_last_layer=True,
+        nlayers=3,
+        hidden_dim=2048,
+        bottleneck_dim=256
     )
 
     from utils.losses import cosine_scheduler
 
     model_student = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=student_dino_head).to(device)
     model_teacher = MultiModalEncoder(student_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).to(device)
-
-    weights_init_normal(model_student)
-    weights_init_normal(model_teacher)
 
     for p in model_student.parameters():
         p.requires_grad = True
@@ -442,78 +428,78 @@ def main_worker():
 
     # Dataset, Sampler, DataLoader
     args = TrainConfig()
-    args.WANDB_PROJECT_NAME = "DinoV2EEG_MultiSub"
+    args.global_config.WANDB_PROJECT_NAME = "DinoV2EEG"
+    args.batch_size = 3000
+    args.learning_rate = 5e-4
+    args.local_epochs = 100
+
+
+
 
     dataset = DINOV2EEGDataset(
         args=args,
-        subject_ids=[1,2],  # or [1] or up to [1,2,...,10]
-        session_ids=[0,1,2],    # select sessions you want for train only 4 session are avialable for Things EEG2
+        subject_ids=[1],  # or [1] or up to [1,2,...,10]
+        session_ids=[0,1],    # select sessions you want for train only 4 session are avialable
         subset="train",
-        n_global_crops=HyperParams.GLOBAL_CROPS,
-        n_local_crops=HyperParams.LOCAL_CROPS,
+        n_global_crops=GLOBAL_CROPS,
+        n_local_crops=LOCAL_CROPS,
         transform_global=eeg_global_aug,
         transform_local=eeg_local_aug,
         max_cache_size=6
     )
 
+    dict_args = config_to_dict(args)
+
     if is_ddp():
         sampler = DistributedSampler(dataset, shuffle=True)
-        dataloader = DataLoader(dataset, batch_size=HyperParams.batch_size, sampler=sampler, num_workers=0, pin_memory=True)
+        dataloader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler, num_workers=0, pin_memory=True)
     else:
-        dataloader = DataLoader(dataset, batch_size=HyperParams.batch_size, shuffle=True, num_workers=0, pin_memory=True)
+        dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
 
     # Loss, optimizer
-    dino_loss = DINOLoss(out_dim=HyperParams.DINO_Head_Dim, 
-                         ncrops=HyperParams.LOCAL_CROPS,
-                         warmup_teacher_temp=HyperParams.warmup_teacher_temp,
-                         teacher_temp=HyperParams.teacher_temp,
-                         warmup_epochs=HyperParams.warmup_teacher_temp_epochs,
-                         nepochs=HyperParams.epochs,
-                         student_temp=HyperParams.student_temp,
-                         center_momentum=HyperParams.center_momentum
-                         ).to(device)
-    
+    dino_loss = DINOLoss(out_dim=DINO_Head_Dim, ncrops=LOCAL_CROPS).to(device)
+    optimizer = optim.AdamW(model_student.parameters(), lr=args.learning_rate)
+
+
+    scaler = torch.cuda.amp.GradScaler()
+
+    epochs = args.local_epochs
+
+    if local_rank == 0:
+        wandb.init(
+            project=args.global_config.WANDB_PROJECT_NAME,          # your project name
+            # mode="offline"
+            config=dict_args,             # log all config parameters
+            notes="initial DINO experiment"
+        )
+
+
     # Initialize your schedulers (call this after defining your args/data_loader)
     lr_schedule = cosine_scheduler(
-        base_value=HyperParams.learning_rate * (HyperParams.batch_size * get_world_size() ) / 256.,
-        final_value=HyperParams.learning_rate_final, # 0.001 | 0.0005 -> 0.000001
-        epochs=HyperParams.epochs,
+        base_value=5e-4 * (args.batch_size * get_world_size() ) / 256.,
+        final_value=1e-6,
+        epochs=args.local_epochs,
         niter_per_epoch=len(dataloader),
-        warmup_epochs=HyperParams.learning_rate_warmpup_epochs,
+        warmup_epochs=10,
         start_warmup_value=0  # can be set to args.start_warmup_lr if you wish
     )
 
     wd_schedule = cosine_scheduler(
-        base_value=HyperParams.wd_base_value,
-        final_value=HyperParams.wd_final_value,
-        epochs=HyperParams.epochs,
+        base_value=0.04,
+        final_value=0.4,
+        epochs=args.local_epochs,
         niter_per_epoch=len(dataloader),
     )
 
     momentum_schedule = cosine_scheduler(
-        base_value=HyperParams.momentum_base_value,
-        final_value=HyperParams.momentum_final_value,
-        epochs=HyperParams.epochs,
+        base_value=0.996,
+        final_value=1.0,
+        epochs=args.local_epochs,
         niter_per_epoch=len(dataloader),
     )
 
-    optimizer = optim.AdamW(model_student.parameters(), lr=HyperParams.learning_rate)
-    scaler = torch.cuda.amp.GradScaler()
-
-    if local_rank == 0:
-        wandb.init(
-            project=args.WANDB_PROJECT_NAME,          # your project name
-            # mode="offline"
-            config=config_to_dict(HyperParams()),             # log all config parameters
-            notes=""""""
-        )
-
-
-    
-
     best_loss = float('inf')
-    it_global = 0
-    for epoch in range(HyperParams.epochs):
+    for epoch in range(epochs):
 
         if is_ddp():
             dataloader.sampler.set_epoch(epoch)
@@ -537,21 +523,21 @@ def main_worker():
             crops = [c.cuda(non_blocking=True) for c in crops]
             global_crops = []
             local_crops = []
-            for i in range(HyperParams.GLOBAL_CROPS):
+            for i in range(GLOBAL_CROPS):
                 global_crops.append(eeg_global_aug(crops[0]))
-            for j in range(HyperParams.LOCAL_CROPS):
+            for j in range(LOCAL_CROPS):
                 local_crops.append(eeg_local_aug(crops[0]))     
 
-            if HyperParams.MIXED_PREC_TRAINING:
+            if MIXED_PREC_TRAINING:
                 with torch.amp.autocast(device_type="cuda"):
                     teacher_out = model_teacher(global_crops, ['eeg'] * len(global_crops))  # only global crops
                     student_out = model_student(local_crops,  ['eeg'] * len(local_crops))
                     loss = dino_loss(student_out, teacher_out, epoch)
 
-                optimizer.zero_grad()
+                cancel_gradients_last_layer(epoch, model_student, freeze_last_layer)  # for freeze_last_layer epochs cancels the gradient for last layer of dino head
+                clip_gradients(model_student, clip_grad)
+                
                 scaler.scale(loss).backward()
-                torch.nn.utils.clip_grad_norm_(model_student.parameters(), HyperParams.clip_grad)
-                cancel_gradients_last_layer(epoch, model_student, HyperParams.freeze_last_layer)  # for freeze_last_layer epochs cancels the gradient for last layer of dino head
                 scaler.step(optimizer)
                 scaler.update() 
             else:    
@@ -559,10 +545,11 @@ def main_worker():
                 student_out = model_student(local_crops,  ['eeg'] * len(local_crops))
                 loss = dino_loss(student_out, teacher_out, epoch)
 
+                cancel_gradients_last_layer(epoch, model_student, freeze_last_layer)
+                clip_gradients(model_student, clip_grad)
+
                 optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model_student.parameters(), HyperParams.clip_grad)
-                cancel_gradients_last_layer(epoch, model_student, HyperParams.freeze_last_layer)
                 optimizer.step()
 
             m = momentum_schedule[it_global]
@@ -587,11 +574,6 @@ def main_worker():
                 
                     "train/loss": loss,
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
-                    "train/teacher_temp": dino_loss.getCurrentTemp(epoch),
-
-                    "schedules/learning_rate": optimizer.param_groups[0]["lr"],
-                    "schedules/teacher_momentum": m,
-                    "schedules/weight_decay": optimizer.param_groups[0]["weight_decay"],
                     
                     "centers/center_mean": dino_loss.center.mean().item(),
                     "centers/center_std": dino_loss.center.std().item(),
@@ -605,6 +587,8 @@ def main_worker():
 
 
         if (not is_ddp() and epoch % 10 == 0) or (is_ddp() and local_rank == 0 and epoch % 10 == 0):
+            # student_to_save = model_student.module if hasattr(model_student, 'modules') else model_student
+            
 
             if loss < best_loss:
                 best_loss = loss
@@ -622,14 +606,6 @@ def main_worker():
                 torch.save(checkpoint, f"dinov2_ckpt_epoch{epoch}.pth")
                 logger.info(f"Checkpoint saved at epoch {epoch}")
 
-    checkpoint = {
-        'epoch': epoch,
-        'model_student': student_to_save.state_dict(),
-        'model_teacher': teacher_to_save.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'scaler': scaler.state_dict(),
-    }
-    torch.save(checkpoint, f"dinov2_ckpt_epoch{epoch+1}_final.pth")
     cleanup_ddp()
 
 if __name__ == '__main__':

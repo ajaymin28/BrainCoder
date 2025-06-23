@@ -11,11 +11,25 @@ import numpy as np
 
 import os
 
-class GlobalConfig:
-    """
-    Global configuration settings for the EEG-Image project.
-    Centralizes paths and other high-level settings.
-    """
+# class GlobalConfig:
+#     """
+#     Global configuration settings for the EEG-Image project.
+#     Centralizes paths and other high-level settings.
+#     """
+
+#     # --- Other Global Settings (optional) ---
+#     # Add any other settings that are constant across different training runs
+#     # e.g., default device, logging level, etc.
+#     # DEVICE = "cuda" if torch.cuda.is_available() else "cpu" # Requires torch import if used here
+
+# Instantiate the global configuration
+# global_config = GlobalConfig()
+
+
+class TrainConfig:
+    # global_config = global_config  # Access the global config
+
+
     # --- Base Directories ---
     # Adjust these paths based on your project structure and environment
     PROJECT_ROOT = "/home/ja882177/EEG/gits/BrainCoder"
@@ -31,26 +45,14 @@ class GlobalConfig:
     WANDB_PROJECT_NAME = "DinoV2_EEG_IMG"
     WANDB_CODE_DIR = PROJECT_ROOT # Directory containing the code to be logged
 
-    # --- Other Global Settings (optional) ---
-    # Add any other settings that are constant across different training runs
-    # e.g., default device, logging level, etc.
-    # DEVICE = "cuda" if torch.cuda.is_available() else "cpu" # Requires torch import if used here
-
-# Instantiate the global configuration
-global_config = GlobalConfig()
-
-
-class TrainConfig:
-    global_config = global_config  # Access the global config
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    local_epochs = 100 # subject data will be trained for local_epochs
+    # local_epochs = 100 # subject data will be trained for local_epochs
     global_epochs = 1  # subject will be repeated for global_epochs*local_epochs
     current_epoch = 1
     current_global_epoch = 1
     current_itr = 0
     current_subject = 1
-    batch_size = 1024
+    # batch_size = 1024
 
     channels = 63
     time_points = 250
@@ -69,7 +71,7 @@ class TrainConfig:
 
     load_pre_trained_models = False
 
-    learning_rate = 0.002
+    # learning_rate = 0.002
     discriminator_lr = 0.002
 
     weight_decay = 1e-5
@@ -83,10 +85,10 @@ class TrainConfig:
     use_pre_trained_encoder = False
 
     # Populate TrainConfig with paths from GlobalConfig
-    eeg_data_path = global_config.EEG_DATA_PATH
-    test_center_path = global_config.TEST_CENTER_PATH
-    model_save_base_dir = global_config.MODEL_BASE_DIR
-    data_base_dir = global_config.DATA_BASE_DIR # Used by EEG_Dataset3
+    eeg_data_path = EEG_DATA_PATH
+    test_center_path = TEST_CENTER_PATH
+    model_save_base_dir = MODEL_BASE_DIR
+    data_base_dir = DATA_BASE_DIR # Used by EEG_Dataset3
     
     Contrastive_augmentation = True
     nSub = 1

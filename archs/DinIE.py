@@ -184,3 +184,132 @@ class DinIE(nn.Module):
     
 
 
+
+
+
+# --- Good Image Encoder (ViT, DINOv2 friendly) ---
+class ImageEncoder(nn.Module):
+    def __init__(self, proj_dim=768, vit_ckpt=None):
+        super().__init__()
+        # Use ViT-Base (DINOv2's default backbone). Requires timm
+        self.vit = vit_base_patch16_224(pretrained=True if vit_ckpt is None else False)
+        if vit_ckpt is not None:
+            state = torch.load(vit_ckpt, map_location='cpu')
+            self.vit.load_state_dict(state, strict=False)
+        self.proj = nn.Sequential(
+            nn.Linear(self.vit.embed_dim, proj_dim),
+            nn.LayerNorm(proj_dim)
+        )
+    def forward(self, x):
+        # x: (B, 3, H, W), any H/W
+        features = self.vit.forward_features(x)  # (B, embed_dim)
+        features = self.proj(features)
+        return features
+
+def trunc_normal_(tensor, mean=0., std=1.):
+    # Timm/trunc_normal compatible with recent PyTorch
+    with torch.no_grad():
+        return tensor.normal_(mean=mean, std=std)
+
+class DINOHead(nn.Module):
+    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True,
+                 nlayers=3, hidden_dim=2048, bottleneck_dim=65536):
+        super().__init__()
+        nlayers = max(nlayers, 1)
+        if nlayers == 1:
+            self.mlp = nn.Linear(in_dim, bottleneck_dim)
+        else:
+            layers = [nn.Linear(in_dim, hidden_dim)]
+            if use_bn:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.GELU())
+            for _ in range(nlayers - 2):
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                if use_bn:
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.append(nn.GELU())
+            layers.append(nn.Linear(hidden_dim, bottleneck_dim))
+            self.mlp = nn.Sequential(*layers)
+        self.apply(self._init_weights)
+        # weight_norm wrapper
+        self.last_layer = torch.nn.utils.parametrizations.weight_norm(
+            nn.Linear(bottleneck_dim, out_dim, bias=False)
+        )
+        # Fill only the weight_g parameter with 1 (per DINO)
+        if hasattr(self.last_layer, "weight_g"):
+            self.last_layer.weight_g.data.fill_(1)
+            if norm_last_layer:
+                self.last_layer.weight_g.requires_grad = False
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.mlp(x)
+        x = nn.functional.normalize(x, dim=-1, p=2)
+        x = self.last_layer(x)
+        return x
+
+# --- Shared Multi-modal Wrapper ---
+class MultiModalEncoder(nn.Module):
+    def __init__(self, eeg_encoder, img_encoder, dino_head):
+        super().__init__()
+        self.eeg_encoder = eeg_encoder
+        self.img_encoder = img_encoder
+        self.dino_head = dino_head
+
+    def forward(self, crops, crop_types=None, get_dino_head=True):
+        outs = []
+
+        if type(crops)==list:
+            for i, crop in enumerate(crops):
+                ctype = None
+                if crop_types is not None:
+                    ctype = crop_types[i]
+                else:
+                    if crop.dim() == 3:
+                        ctype = 'eeg'
+                    elif crop.dim() == 4 and crop.shape[1] == 3:
+                        ctype = 'img'
+                    else:
+                        raise ValueError(f"Unknown crop shape: {crop.shape}")
+                if ctype == 'eeg':
+                    feat = self.eeg_encoder(crop)
+                elif ctype == 'img':
+                    feat = self.img_encoder(crop)
+                else:
+                    raise ValueError(f"Unknown crop type: {ctype}")
+                
+                if get_dino_head:
+                    out = self.dino_head(feat)
+                    outs.append(out)
+                else: 
+                    outs.append(feat)
+        else:
+            ctype = None
+            if crop_types is not None:
+                ctype = crop_types[i]
+            else:
+                if crop.dim() == 3:
+                    ctype = 'eeg'
+                elif crop.dim() == 4 and crop.shape[1] == 3:
+                    ctype = 'img'
+                else:
+                    raise ValueError(f"Unknown crop shape: {crop.shape}")
+            if ctype == 'eeg':
+                feat = self.eeg_encoder(crop)
+            elif ctype == 'img':
+                feat = self.img_encoder(crop)
+            else:
+                raise ValueError(f"Unknown crop type: {ctype}")
+            
+            if get_dino_head:
+                out = self.dino_head(feat)
+                outs.append(out)
+            else: 
+                outs.append(feat)
+
+        return outs

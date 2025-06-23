@@ -8,7 +8,7 @@ from collections import OrderedDict
 from utils.common import TrainConfig
 from collections import defaultdict
 
-def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_prob=0.2, min_len=100, max_len=225, crop_prob=1.0):
+def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_prob=0.2, min_len=150, max_len=250, crop_prob=1.0):
     """
     EEG sample (channels, time) or (batch, channels, time)
     """
@@ -59,7 +59,7 @@ def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_pr
         x = x.squeeze(0)  # Remove batch dim
     return x
 
-def eeg_local_aug(x, min_len=64, max_len=100, noise_std=0.05, crop_prob=1.0):
+def eeg_local_aug(x, min_len=100, max_len=150, noise_std=0.05, crop_prob=1.0):
     """
     EEG sample (channels, time) or (batch, channels, time)
     """
@@ -127,7 +127,7 @@ class DINOV2EEGDataset(Dataset):
         self.n_same_class_aug = n_local_crops + n_global_crops
 
         # --- Load image metadata & features (shared for all subjects) ---
-        img_meta_dir = os.path.join(args.global_config.DATA_BASE_DIR, "Data", "Things-EEG2", 'Image_set')
+        img_meta_dir = os.path.join(args.DATA_BASE_DIR, "Data", "Things-EEG2", 'Image_set')
         img_metadata = np.load(os.path.join(img_meta_dir, 'image_metadata.npy'), allow_pickle=True).item()
 
         data_key = "train" if subset in {"train", "val"} else "test"
@@ -136,16 +136,16 @@ class DINOV2EEGDataset(Dataset):
         self.class_to_id = {c: i for i, c in enumerate(sorted(set(self.img_concepts)))}
 
         if self.subset == "train" or self.subset == "val":
-            img_feature_path = os.path.join(args.global_config.IMG_DATA_PATH, self.args.dnn + '_feature_maps_training.npy')
+            img_feature_path = os.path.join(args.IMG_DATA_PATH, self.args.dnn + '_feature_maps_training.npy')
         else:
-            img_feature_path = os.path.join(args.global_config.IMG_DATA_PATH, self.args.dnn + '_feature_maps_test.npy')
+            img_feature_path = os.path.join(args.IMG_DATA_PATH, self.args.dnn + '_feature_maps_test.npy')
         self.img_features = np.load(img_feature_path, allow_pickle=True).squeeze()
 
         # --- Build master index: (subject, class_idx, session_idx) for random access ---
         self.master_index = []
         for subject_idx, subject_id in enumerate(subject_ids):
             eegfilekey = "training" if data_key == "train" else data_key
-            eeg_path = os.path.join(self.args.global_config.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
+            eeg_path = os.path.join(self.args.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
             eeg_dict = np.load(eeg_path, allow_pickle=True)
             eeg_data = eeg_dict['preprocessed_eeg_data'] # (1654, 4, 63, 250)
             num_classes, num_sessions = eeg_data.shape[:2]
@@ -178,7 +178,7 @@ class DINOV2EEGDataset(Dataset):
             return self._file_cache[subject_id]
         # Else, load file and add to cache
         eegfilekey = "training" if self.subset in {"train", "val"} else self.subset
-        eeg_path = os.path.join(self.args.global_config.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
+        eeg_path = os.path.join(self.args.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
         eeg_dict = np.load(eeg_path, allow_pickle=True)
         eeg_data = eeg_dict['preprocessed_eeg_data']
         del eeg_dict
@@ -271,7 +271,7 @@ class DINOV2EEGDatasetKaggle(Dataset):
 
         # --- Load image metadata & features (shared for all subjects) ---
         # img_meta_dir = os.path.join(args.global_config.DATA_BASE_DIR, "Data", "Things-EEG2", 'Image_set')
-        img_metadata = np.load(os.path.join(args.global_config.IMG_DATA_PATH, 'image_metadata.npy'), allow_pickle=True).item()
+        img_metadata = np.load(os.path.join(args.IMG_DATA_PATH, 'image_metadata.npy'), allow_pickle=True).item()
 
         data_key = "train" if subset in {"train", "val"} else "test"
         self.img_file_names = img_metadata[f'{data_key}_img_files']
@@ -279,16 +279,16 @@ class DINOV2EEGDatasetKaggle(Dataset):
         self.class_to_id = {c: i for i, c in enumerate(sorted(set(self.img_concepts)))}
 
         if self.subset == "train" or self.subset == "val":
-            img_feature_path = os.path.join(args.global_config.TEST_CENTER_PATH, self.args.dnn + '_feature_maps_training.npy')
+            img_feature_path = os.path.join(args.TEST_CENTER_PATH, self.args.dnn + '_feature_maps_training.npy')
         else:
-            img_feature_path = os.path.join(args.global_config.TEST_CENTER_PATH, self.args.dnn + '_feature_maps_test.npy')
+            img_feature_path = os.path.join(args.TEST_CENTER_PATH, self.args.dnn + '_feature_maps_test.npy')
         self.img_features = np.load(img_feature_path, allow_pickle=True).squeeze()
 
         # --- Build master index: (subject, class_idx, session_idx) for random access ---
         self.master_index = []
         for subject_idx, subject_id in enumerate(subject_ids):
             eegfilekey = "training" if data_key == "train" else data_key
-            eeg_path = os.path.join(self.args.global_config.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
+            eeg_path = os.path.join(self.args.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
             eeg_dict = np.load(eeg_path, allow_pickle=True)
             eeg_data = eeg_dict['preprocessed_eeg_data'] # (1654, 4, 63, 250)
             num_classes, num_sessions = eeg_data.shape[:2]
@@ -321,7 +321,7 @@ class DINOV2EEGDatasetKaggle(Dataset):
             return self._file_cache[subject_id]
         # Else, load file and add to cache
         eegfilekey = "training" if self.subset in {"train", "val"} else self.subset
-        eeg_path = os.path.join(self.args.global_config.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
+        eeg_path = os.path.join(self.args.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
         eeg_dict = np.load(eeg_path, allow_pickle=True)
         eeg_data = eeg_dict['preprocessed_eeg_data']
         del eeg_dict
