@@ -214,11 +214,7 @@ class DynamicEEG2DEncoder(nn.Module):
             nn.BatchNorm1d(96),             # (BatchNorm1d): torch.Size([5, 40, 248])
             nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
             nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 40, 124])
-
-            nn.Conv1d(96, 40, 1, 1, 0),     # (Conv1d): torch.Size([5, 32, 63])
-            nn.BatchNorm1d(40),             # (BatchNorm1d): torch.Size([5, 32, 63])
-            nn.ELU(), 
-            
+            nn.Dropout(0.2),
             nn.Conv1d(40, 32, 2, 1, 0),     # (Conv1d): torch.Size([5, 32, 63])
             nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
             nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])

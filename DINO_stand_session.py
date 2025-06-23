@@ -115,8 +115,8 @@ class IE():
         self.Enc_eeg = Enc_eeg().cuda()
         # self.Enc_eeg = ThingsEEGConv(channels=63,time=250,n_classes=1654,proj_dim=768).cuda()
         
-        # teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768).cuda()
-        teacher_eeg_encoder = EEGTSConv1DEncoder(proj_dim=768).cuda()
+        teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768).cuda()
+        # teacher_eeg_encoder = EEGTSConv1DEncoder(proj_dim=768).cuda()
         # DINO_Head_Dim = 128
         # teacher_dino_head = DINOHead(
         #     in_dim=768,                   # Feature dim from both encoders
