@@ -128,7 +128,7 @@ class IE():
             bottleneck_dim=768
         )
         self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).cuda()
-        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/model_checkpoints/sub1/astral-forest-28/dinov2_ckpt_epoch80.pth")
+        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/model_checkpoints/sub1/chocolote-wood-32/dinov2_ckpt_epoch70.pth")
         self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"], strict=True)
 
         self.Proj_eeg = Proj_eeg(embedding_dim=768, proj_dim=768).cuda()
@@ -248,8 +248,8 @@ class IE():
         self.Proj_img.apply(weights_init_normal)
 
         train_img_feature_base, test_img_feature = self.get_image_data() 
-        MEAN_TRAIN_DATA = True
-        MEAN_TEST_DATA = True
+        MEAN_TRAIN_DATA = False
+        MEAN_TEST_DATA = False
         train_eeg, train_img_feature, _, _ = self.get_eeg_data(train_img_feature_base,test_img_feature, train_sessions=[0,1,2], test_sessions=[i for i in range(80)], mean_data=MEAN_TRAIN_DATA) # use seperate session for train and val
         _, _, test_eeg, test_label = self.get_eeg_data(train_img_feature_base,test_img_feature, train_sessions=None, test_sessions=[i for i in range(80)], mean_data=MEAN_TEST_DATA) # use seperate session for train and val
         val_eeg, val_img_feature, _, _ = self.get_eeg_data(train_img_feature_base,test_img_feature,train_sessions=[3], test_sessions=None, mean_data=MEAN_TRAIN_DATA) # different session for val
@@ -521,7 +521,7 @@ def main():
             project="DinoV2EEG_IMG_Align",          # your project name
             # mode="offline"
             config=dict_args,             # log all config parameters
-            notes="Pretrained sub[1,2] FT sub-1] SESSION 1,2,3"
+            notes="Pretrained sub[1] FT [sub-1] SESSION 1,2,3, pretrained weights: chocoloate-wood-32"
         )
 
         print('Subject %d' % (i+1))
