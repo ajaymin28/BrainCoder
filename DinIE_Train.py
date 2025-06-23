@@ -375,7 +375,7 @@ def main_worker():
         warmup_teacher_temp=0.04
         teacher_temp=0.07
         warmup_teacher_temp_epochs=30  # 0.07 --> 0.2 over 30 epochs
-        student_temp=0.1
+        student_temp=0.2
         center_momentum=0.996   # higher for smaller batches i.e 0.9995 scheduled to being 1.0 by end of the training
 
         wd_base_value=0.04
