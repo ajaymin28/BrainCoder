@@ -357,3 +357,71 @@ class DynamicEEG2DEncoder(nn.Module):
         # z = self.feature_head(z)
         # print("feature_head", z.shape)
         return z
+    
+
+
+class ResidualBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, pool=True):
+        super().__init__()
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size,
+                              stride=1, padding=kernel_size // 2)
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.elu = nn.ELU()
+        self.ln = nn.LayerNorm(out_channels)
+        self.pool = nn.AvgPool1d(kernel_size=3, stride=2, padding=1) if pool else nn.Identity()
+        # Residual path: adapt if channels differ
+        self.residual = (
+            nn.Conv1d(in_channels, out_channels, kernel_size=1)
+            if in_channels != out_channels else nn.Identity()
+        )
+
+    def forward(self, x):
+        residual = self.residual(x)
+        out = self.conv(x)
+        out = self.bn(out)
+        out = self.elu(out)
+        # Permute for LayerNorm
+        out = out.permute(0, 2, 1)      # (B, L, C)
+        out = self.ln(out)
+        out = out.permute(0, 2, 1)      # (B, C, L)
+        out = self.pool(out)
+        residual = self.pool(residual)
+        return out + residual
+
+class EEGTSConv1DEncoder(nn.Module):
+    def __init__(self, proj_dim=768, drop_proj=0.5):
+        super().__init__()
+        self.block1 = ResidualBlock1D(63, 128, kernel_size=15, pool=True)  # Big kernel for context
+        self.block2 = ResidualBlock1D(128, 96, kernel_size=11, pool=True)
+        self.block3 = ResidualBlock1D(96, 64, kernel_size=7, pool=True)
+        self.block4 = ResidualBlock1D(64, 32, kernel_size=5, pool=True)
+        self.global_pool_1d = nn.AdaptiveAvgPool1d(32)
+
+        self.flatten = nn.Flatten(1)
+        self.feature_head = nn.Sequential(
+            nn.Linear(1024, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            ResidualAdd(nn.Sequential(
+                nn.GELU(),
+                nn.Linear(proj_dim, proj_dim),
+                nn.Dropout(drop_proj),
+            )),
+        )
+
+    def forward(self, x):
+
+        if len(x.shape) == 4:
+            x = x.squeeze(1)
+
+        # x: (B, 63, T)
+        x = self.block1(x)      # (B, 128, T/2)
+        x = self.block2(x)      # (B, 96, T/4)
+        x = self.block3(x)      # (B, 64, T/8)
+        x = self.block4(x)      # (B, 32, T/16)
+        x = self.global_pool_1d(x)  # (B, 32, 32)
+
+        x = self.flatten(x)
+        x = self.feature_head(x)
+
+
+        return x
