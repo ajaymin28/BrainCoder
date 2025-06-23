@@ -195,22 +195,36 @@ class DynamicEEG2DEncoder(nn.Module):
         
 
         # Input shape: (2, 1, 63, 250)
-        self.tsconv = nn.Sequential(
-            nn.Conv2d(1, 64, (1, 8), (1, 1)),   # torch.Size([2, 64, 63, 243])
-            nn.BatchNorm2d(64),                 # torch.Size([2, 64, 63, 243])
-            nn.ELU(),                           # torch.Size([2, 64, 63, 243])
-            nn.AvgPool2d((1, 25), (1, 2)),      # torch.Size([2, 64, 63, 110])
+        # self.tsconv = nn.Sequential(
+        #     nn.Conv2d(1, 64, (1, 8), (1, 1)),   # torch.Size([2, 64, 63, 243])
+        #     nn.BatchNorm2d(64),                 # torch.Size([2, 64, 63, 243])
+        #     nn.ELU(),                           # torch.Size([2, 64, 63, 243])
+        #     nn.AvgPool2d((1, 25), (1, 2)),      # torch.Size([2, 64, 63, 110])
 
-            nn.Conv2d(64, 40, (32, 1), (1, 1)), # torch.Size([2, 32, 14, 107])  
-            nn.BatchNorm2d(40),                 # torch.Size([2, 32, 14, 107])
-            nn.ELU(),                           # torch.Size([2, 32, 14, 107])
-            nn.Dropout(0.5),                    # torch.Size([2, 32, 14, 107])
+        #     nn.Conv2d(64, 40, (32, 1), (1, 1)), # torch.Size([2, 32, 14, 107])  
+        #     nn.BatchNorm2d(40),                 # torch.Size([2, 32, 14, 107])
+        #     nn.ELU(),                           # torch.Size([2, 32, 14, 107])
+        #     nn.Dropout(0.5),                    # torch.Size([2, 32, 14, 107])
+        # )
+
+        # self.global_pool = nn.AdaptiveAvgPool2d((4,32))  # Pool (B, filters, 10, 32)
+
+        self.tsconv_1d = nn.Sequential(
+            nn.Conv1d(63, 40, 3, 1),        # (Conv1d): torch.Size([5, 40, 248])
+            nn.BatchNorm1d(40),             # (BatchNorm1d): torch.Size([5, 40, 248])
+            nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
+            nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 40, 124])
+            nn.Conv1d(40, 32, 2, 2, 1),     # (Conv1d): torch.Size([5, 32, 63])
+            nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
+            nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
+            nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 32, 32])
         )
+        self.global_pool_1d = nn.AdaptiveAvgPool1d(32)   # fix time 32
 
-        self.global_pool = nn.AdaptiveAvgPool2d((4,32))  # Pool (B, filters, 10, 32)
+
         self.flatten = nn.Flatten(1)
         self.feature_head = nn.Sequential(
-            nn.Linear(5120, proj_dim),
+            nn.Linear(1024, proj_dim),
             nn.BatchNorm1d(proj_dim),
             ResidualAdd(nn.Sequential(
                 nn.GELU(),
@@ -307,11 +321,15 @@ class DynamicEEG2DEncoder(nn.Module):
             # batch, channel, time
             x = x.unsqueeze(1) # add extra channel dim batch, 1, channel, time
 
-        # print("x", x.shape)
-        z = self.tsconv(x)
-        # print("tsconv", z.shape)
-        z = self.global_pool(z)
-        # print("global_pool", z.shape)
+        # # print("x", x.shape)
+        # z = self.tsconv(x)
+        # # print("tsconv", z.shape)
+        # z = self.global_pool(z)
+        # # print("global_pool", z.shape)
+
+        z = self.tsconv_1d(x)
+        z = self.global_pool_1d(z)
+
         z = self.flatten(z)
         # print("flatten", z.shape)
         z = self.feature_head(z)
