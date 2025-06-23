@@ -219,7 +219,7 @@ class DynamicEEG2DEncoder(nn.Module):
             nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
             nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 32, 32])
         )
-        self.global_pool_1d = nn.AdaptiveAvgPool1d(32)   # fix time 32
+        self.global_pool_1d = nn.AdaptiveAvgPool1d(64)   # fix time 32
 
 
         self.flatten = nn.Flatten(1)
