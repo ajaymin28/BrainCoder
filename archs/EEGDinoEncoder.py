@@ -164,6 +164,7 @@ class DINOV2EEGEncoder(nn.Module):
 class DynamicEEG2DEncoder(nn.Module):
     def __init__(self, proj_dim=768, drop_proj=0.5):
         super().__init__()
+
         # self.encoder = nn.Sequential(
         #     nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),  # (B, 64, C, T)
         #     nn.BatchNorm2d(64),
@@ -179,7 +180,7 @@ class DynamicEEG2DEncoder(nn.Module):
         #     nn.ELU(),
         # )
         # # Global pooling: output is always (B, 32,32)
-        # self.global_pool = nn.AdaptiveAvgPool2d((63,100))  # (B, 4, 63, 100)
+        # self.global_pool = nn.AdaptiveAvgPool2d((32,32))  # (B, 4, 63, 100)
 
         # FROM THE NICE Paper but customized for 63,100 input and needed output (32,32)
         # self.tsconv = nn.Sequential(
@@ -209,19 +210,63 @@ class DynamicEEG2DEncoder(nn.Module):
 
         # self.global_pool = nn.AdaptiveAvgPool2d((4,32))  # Pool (B, filters, 10, 32)
 
-        self.tsconv_1d = nn.Sequential(
-            nn.Conv1d(63, 40, 25, 1, 0),    # (Conv1d): torch.Size([5, 40, 248])
-            nn.BatchNorm1d(40),             # (BatchNorm1d): torch.Size([5, 40, 248])
-            nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
-            nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 40, 124])
-            # nn.Dropout(0.2),
-            nn.Conv1d(40, 32, 2, 1, 0),     # (Conv1d): torch.Size([5, 32, 63])
-            nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
-            nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
-            # nn.AvgPool1d(3,2,1),          # (AvgPool1d): torch.Size([5, 32, 32])
-        )
-        self.global_pool_1d = nn.AdaptiveAvgPool1d(32)   # fix time 32
+        # self.tsconv_1d = nn.Sequential(
+        #     nn.Conv1d(63, 40, 25, 1, 0),    # (Conv1d): torch.Size([5, 40, 248])
+        #     nn.BatchNorm1d(40),             # (BatchNorm1d): torch.Size([5, 40, 248])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
+        #     nn.Conv1d(40, 64, 25, 1, 0),    # (Conv1d): torch.Size([5, 40, 248])
+        #     nn.BatchNorm1d(64),             # (BatchNorm1d): torch.Size([5, 40, 248])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
+        #     nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 40, 124])
+        #     nn.Conv1d(64, 32, 2, 1, 0),     # (Conv1d): torch.Size([5, 32, 63])
+        #     nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
+        #     nn.AvgPool1d(3,2,1),          # (AvgPool1d): torch.Size([5, 32, 32])
+        # )
+        # self.global_pool_1d = nn.AdaptiveAvgPool1d(32)   # fix time 32
+        # self.tsconv_1d = nn.Sequential(
+        #     nn.Conv1d(63, 50, 25, 1, 0),    # (Conv1d): torch.Size([5, 40, 248])
+        #     nn.BatchNorm1d(50),             # (BatchNorm1d): torch.Size([5, 40, 248])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
+            
+        #     nn.Conv1d(50, 32, 25, 1, 0),    # (Conv1d): torch.Size([5, 40, 248])
+        #     nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 40, 248])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
 
+        #     nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 40, 124])
+
+        #     nn.Conv1d(32, 32, 2, 1, 0),     # (Conv1d): torch.Size([5, 32, 63])
+        #     nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
+
+        #     nn.Conv1d(32, 32, 2, 1, 0),     # (Conv1d): torch.Size([5, 32, 63])
+        #     nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
+        #     nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
+
+        #     nn.AvgPool1d(3,2,1),          # (AvgPool1d): torch.Size([5, 32, 32])
+        # )
+        # self.global_pool_1d = nn.AdaptiveAvgPool1d(32)   # fix time 32
+
+
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=(1,1), stride=(1,2), padding=0),  # (B, 64, C, T)
+            nn.BatchNorm2d(64),
+            nn.ELU(),
+            nn.AvgPool2d((1,1),(1,1)),
+
+            nn.Conv2d(64, 32, kernel_size=(1,1), stride=(1,2), padding=0), # (B, 32, C, T)
+            nn.BatchNorm2d(32),
+            nn.ELU(),
+            nn.AvgPool2d((1,1),(1,1)),
+
+
+            nn.Conv2d(32, 32, kernel_size=(63,32), stride=(1,1), padding=0), # (B, 32, C, T)
+            nn.BatchNorm2d(32),
+            nn.ELU(),
+            nn.AvgPool2d((1,1),(1,1)),
+
+        )
+        self.global_pool = nn.AdaptiveAvgPool2d((1,32))  # (B, 4, 63, 100)
 
         self.flatten = nn.Flatten(1)
         self.feature_head = nn.Sequential(
@@ -333,25 +378,25 @@ class DynamicEEG2DEncoder(nn.Module):
         # z = self.global_pool(z)
         # # print("global_pool", z.shape)
 
-        z = self.tsconv_1d(x)
-        z = self.global_pool_1d(z)
+        # z = self.tsconv_1d(x)
+        # z = self.global_pool_1d(z)
 
-        z = self.flatten(z)
-        # print("flatten", z.shape)
-        z = self.feature_head(z)
-        # print("feature_head", z.shape)
+        # z = self.flatten(z)
+        # # print("flatten", z.shape)
+        # z = self.feature_head(z)
+        # # print("feature_head", z.shape)
         
-        # print("in size", x.shape)
-        # z = self.encoder(x)
-        # print("encoder", z.shape)
-        # z = self.global_pool(z)
-        # print("global_pool", z.shape)
+        print("in size", x.shape)
+        z = self.encoder(x)
+        print("encoder", z.shape)
+        z = self.global_pool(z)
+        print("global_pool", z.shape)
         # z = self.tsconv(z)
         # print("tsconv", z.shape)
-        # z = self.flatten(z)
-        # print("flatten", z.shape)
-        # z = self.feature_head(z)
-        # print("feature_head", z.shape)
+        z = self.flatten(z)
+        print("flatten", z.shape)
+        z = self.feature_head(z)
+        print("feature_head", z.shape)
         return z
     
 
