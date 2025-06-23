@@ -117,19 +117,19 @@ class IE():
         
         teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768).cuda()
         # teacher_eeg_encoder = EEGTSConv1DEncoder(proj_dim=768).cuda()
-        # DINO_Head_Dim = 128
-        # teacher_dino_head = DINOHead(
-        #     in_dim=768,                   # Feature dim from both encoders
-        #     out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
-        #     use_bn=False,
-        #     norm_last_layer=True,
-        #     nlayers=3,
-        #     hidden_dim=2048,
-        #     bottleneck_dim=256
-        # )
-        self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=None).cuda()
-        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/dinov2_ckpt_epoch50.pth")
-        self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"])
+        DINO_Head_Dim = 4096
+        teacher_dino_head = DINOHead(
+            in_dim=768,                   # Feature dim from both encoders
+            out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
+            use_bn=False,
+            norm_last_layer=True,
+            nlayers=3,
+            hidden_dim=2048,
+            bottleneck_dim=768
+        )
+        self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).cuda()
+        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/model_checkpoints/sub1/astral-forest-28/dinov2_ckpt_epoch80.pth")
+        self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"], strict=True)
 
         self.Proj_eeg = Proj_eeg(embedding_dim=768, proj_dim=768).cuda()
         self.Proj_img = Proj_img(embedding_dim=768, proj_dim=768).cuda()
@@ -314,8 +314,9 @@ class IE():
                 labels = labels.cuda().type(self.LongTensor)
 
                 # obtain the features
-                eeg_features = self.Enc_eeg([eeg],  ['eeg'], get_dino_head=False)
-                eeg_features = torch.stack(eeg_features, dim=0).view(eeg.size(0), -1)
+                with torch.no_grad():
+                    eeg_features = self.Enc_eeg([eeg],  ['eeg'], get_dino_head=False)
+                    eeg_features = torch.stack(eeg_features, dim=0).view(eeg.size(0), -1)
                 # eeg_features = self.Enc_eeg(eeg)
                 
                 # print("eeg feat", eeg_features.size())

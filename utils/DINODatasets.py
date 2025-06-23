@@ -47,19 +47,19 @@ def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_pr
     #     scale = 1.0 + (torch.randn(x.shape[1], device=x.device) * 0.1)
     #     x = x * scale.unsqueeze(0).unsqueeze(-1)
 
-    # 5. Random Temporal Masking
-    if torch.rand(1) < 0.5:
-        t = x.shape[-1]
-        mask_len = torch.randint(10, 40, (1,)).item()
-        if t - mask_len > 0:
-            start = torch.randint(0, t - mask_len, (1,)).item()
-            x[..., start:start+mask_len] = 0
+    # # 5. Random Temporal Masking
+    # if torch.rand(1) < 0.5:
+    #     t = x.shape[-1]
+    #     mask_len = torch.randint(10, 40, (1,)).item()
+    #     if t - mask_len > 0:
+    #         start = torch.randint(0, t - mask_len, (1,)).item()
+    #         x[..., start:start+mask_len] = 0
 
     if not is_batch:
         x = x.squeeze(0)  # Remove batch dim
     return x
 
-def eeg_local_aug(x, min_len=100, max_len=150, noise_std=0.05, crop_prob=1.0):
+def eeg_local_aug(x, min_len=100, max_len=150, noise_std=0.09, crop_prob=1.0):
     """
     EEG sample (channels, time) or (batch, channels, time)
     """
@@ -86,6 +86,14 @@ def eeg_local_aug(x, min_len=100, max_len=150, noise_std=0.05, crop_prob=1.0):
     # if torch.rand(1) < 0.5:
     #     scale = 1.0 + (torch.randn(c, device=x.device) * 0.05)
     #     x = x * scale.unsqueeze(0).unsqueeze(-1)
+
+    # 5. Random Temporal Masking
+    # if torch.rand(1) < 0.5:
+    #     t = x.shape[-1]
+    #     mask_len = torch.randint(10, 40, (1,)).item()
+    #     if t - mask_len > 0:
+    #         start = torch.randint(0, t - mask_len, (1,)).item()
+    #         x[..., start:start+mask_len] = 0
 
     if not is_batch:
         x = x.squeeze(0)

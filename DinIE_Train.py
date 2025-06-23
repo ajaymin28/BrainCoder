@@ -352,7 +352,7 @@ def main_worker():
     class HyperParams:
 
         batch_size = 10240
-        epochs = 300
+        epochs = 100
 
         GLOBAL_CROPS = 2
         LOCAL_CROPS = 4
@@ -360,13 +360,14 @@ def main_worker():
         freeze_last_layer = 1
         clip_grad = 1.0
 
-        DINO_Head_Dim = 65536
-        DINO_Head_bottleneck_dim = 256
+        DINO_Head_Dim = 4096
+        DINO_Head_bottleneck_dim = 768
         DINO_Head_hidden_dim = 2048
         DINO_Head_nlayers = 3
         DINO_Head_norm_last_layer = False  # in orginal False with vit_small and True with vit_base.
         DINO_Head_use_bn = False
 
+        # learning_rate = 5e-4
         learning_rate = 5e-4
         learning_rate_warmpup_epochs = 10
         learning_rate_final = 1e-6
@@ -374,7 +375,7 @@ def main_worker():
         warmup_teacher_temp=0.04
         teacher_temp=0.07
         warmup_teacher_temp_epochs=30  # 0.07 --> 0.2 over 30 epochs
-        student_temp=0.2
+        student_temp=0.1
         center_momentum=0.996   # higher for smaller batches i.e 0.9995 scheduled to being 1.0 by end of the training
 
         wd_base_value=0.04
@@ -446,14 +447,14 @@ def main_worker():
 
     dataset = DINOV2EEGDataset(
         args=args,
-        subject_ids=[1,2,3,4,5,6,7,8,9],  # or [1] or up to [1,2,...,10]
+        subject_ids=[1],  # or [1] or up to [1,2,...,10]
         session_ids=[0,1,2],    # select sessions you want for train only 4 session are avialable for Things EEG2
         subset="train",
         n_global_crops=HyperParams.GLOBAL_CROPS,
         n_local_crops=HyperParams.LOCAL_CROPS,
         transform_global=eeg_global_aug,
         transform_local=eeg_local_aug,
-        max_cache_size=6
+        max_cache_size=10
     )
 
     if is_ddp():
