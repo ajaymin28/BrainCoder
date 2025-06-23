@@ -352,7 +352,7 @@ def main_worker():
     class HyperParams:
 
         batch_size = 10240
-        epochs = 100
+        epochs = 300
 
         GLOBAL_CROPS = 2
         LOCAL_CROPS = 4
@@ -446,8 +446,8 @@ def main_worker():
 
     dataset = DINOV2EEGDataset(
         args=args,
-        subject_ids=[1,2],  # or [1] or up to [1,2,...,10]
-        session_ids=[0,1,2,3],    # select sessions you want for train only 4 session are avialable for Things EEG2
+        subject_ids=[1,2,3,4,5,6,7,8,9],  # or [1] or up to [1,2,...,10]
+        session_ids=[0,1,2],    # select sessions you want for train only 4 session are avialable for Things EEG2
         subset="train",
         n_global_crops=HyperParams.GLOBAL_CROPS,
         n_local_crops=HyperParams.LOCAL_CROPS,
