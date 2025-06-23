@@ -128,8 +128,8 @@ class IE():
         #     bottleneck_dim=256
         # )
         self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=None).cuda()
-        # loaded_dict = torch.load(f"checkpoints\\{model_idx}\\dinov2_ckpt_epoch99_final.pth")
-        # self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"])
+        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/dinov2_ckpt_epoch50.pth")
+        self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"])
 
         self.Proj_eeg = Proj_eeg(embedding_dim=768, proj_dim=768).cuda()
         self.Proj_img = Proj_img(embedding_dim=768, proj_dim=768).cuda()
@@ -243,7 +243,7 @@ class IE():
 
     def train(self):
         
-        self.Enc_eeg.apply(weights_init_normal)
+        # self.Enc_eeg.apply(weights_init_normal)
         self.Proj_eeg.apply(weights_init_normal)
         self.Proj_img.apply(weights_init_normal)
 
@@ -286,7 +286,10 @@ class IE():
         self.test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=self.batch_size_test, shuffle=False)
 
         # Optimizers
-        self.optimizer = torch.optim.Adam(itertools.chain(self.Enc_eeg.parameters(), self.Proj_eeg.parameters(), self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
+        self.optimizer = torch.optim.Adam(itertools.chain(self.Proj_eeg.parameters(), self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
+
+        for name, param in self.Enc_eeg.named_parameters():
+            param.requires_grad = False
 
         num = 0
         best_loss_val = np.inf
@@ -295,7 +298,7 @@ class IE():
         for e in tqdm(range(self.n_epochs)):
             in_epoch = time.time()
 
-            self.Enc_eeg.train()
+            # self.Enc_eeg.train()
             self.Proj_eeg.train()
             self.Proj_img.train()
 
@@ -517,7 +520,7 @@ def main():
             project="DinoV2EEG_IMG_Align",          # your project name
             # mode="offline"
             config=dict_args,             # log all config parameters
-            notes="[subject-1]  SESSION 1,2,3 NICE Model"
+            notes="Pretrained sub[1,2] FT sub-1] SESSION 1,2,3"
         )
 
         print('Subject %d' % (i+1))

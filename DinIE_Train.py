@@ -351,7 +351,7 @@ def main_worker():
 
     class HyperParams:
 
-        batch_size = 3000
+        batch_size = 10240
         epochs = 100
 
         GLOBAL_CROPS = 2
@@ -360,7 +360,7 @@ def main_worker():
         freeze_last_layer = 1
         clip_grad = 1.0
 
-        DINO_Head_Dim = 8192
+        DINO_Head_Dim = 65536
         DINO_Head_bottleneck_dim = 256
         DINO_Head_hidden_dim = 2048
         DINO_Head_nlayers = 3
@@ -447,7 +447,7 @@ def main_worker():
     dataset = DINOV2EEGDataset(
         args=args,
         subject_ids=[1,2],  # or [1] or up to [1,2,...,10]
-        session_ids=[0,1,2],    # select sessions you want for train only 4 session are avialable for Things EEG2
+        session_ids=[0,1,2,3],    # select sessions you want for train only 4 session are avialable for Things EEG2
         subset="train",
         n_global_crops=HyperParams.GLOBAL_CROPS,
         n_local_crops=HyperParams.LOCAL_CROPS,
