@@ -373,7 +373,7 @@ def main_worker():
         learning_rate_final = 1e-6
 
         warmup_teacher_temp=0.04
-        teacher_temp=0.07
+        teacher_temp=0.04
         warmup_teacher_temp_epochs=30  # 0.07 --> 0.2 over 30 epochs
         student_temp=0.2
         center_momentum=0.996   # higher for smaller batches i.e 0.9995 scheduled to being 1.0 by end of the training
