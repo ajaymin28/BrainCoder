@@ -317,9 +317,14 @@ class DynamicEEG2DEncoder(nn.Module):
 
     def forward(self, x):
         # x: (B, 1, C, T) with variable C and T across batches (but fixed within batch)
-        if len(x.shape)==3:
-            # batch, channel, time
-            x = x.unsqueeze(1) # add extra channel dim batch, 1, channel, time
+        
+        # if len(x.shape)==3:
+        #     # batch, channel, time
+        #     x = x.unsqueeze(1) # add extra channel dim batch, 1, channel, time
+
+        # For 1D Conv
+        if len(x.shape) == 4:
+            x = x.squeeze(1)
 
         # # print("x", x.shape)
         # z = self.tsconv(x)
