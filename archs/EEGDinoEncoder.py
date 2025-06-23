@@ -214,17 +214,17 @@ class DynamicEEG2DEncoder(nn.Module):
             nn.BatchNorm1d(40),             # (BatchNorm1d): torch.Size([5, 40, 248])
             nn.ELU(),                       # (ELU): torch.Size([5, 40, 248])
             nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 40, 124])
-            nn.Conv1d(40, 32, 2, 2, 1),     # (Conv1d): torch.Size([5, 32, 63])
-            nn.BatchNorm1d(32),             # (BatchNorm1d): torch.Size([5, 32, 63])
+            nn.Conv1d(40, 40, 2, 2, 1),     # (Conv1d): torch.Size([5, 32, 63])
+            nn.BatchNorm1d(40),             # (BatchNorm1d): torch.Size([5, 32, 63])
             nn.ELU(),                       # (ELU): torch.Size([5, 32, 63])
             nn.AvgPool1d(3,2,1),            # (AvgPool1d): torch.Size([5, 32, 32])
         )
-        self.global_pool_1d = nn.AdaptiveAvgPool1d(64)   # fix time 32
+        self.global_pool_1d = nn.AdaptiveAvgPool1d(32)   # fix time 32
 
 
         self.flatten = nn.Flatten(1)
         self.feature_head = nn.Sequential(
-            nn.Linear(1024, proj_dim),
+            nn.Linear(1280, proj_dim),
             nn.BatchNorm1d(proj_dim),
             ResidualAdd(nn.Sequential(
                 nn.GELU(),

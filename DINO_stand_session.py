@@ -36,7 +36,7 @@ parser.add_argument('--dnn', default='dinov2', type=str)
 parser.add_argument('--epoch', default='200', type=int)
 parser.add_argument('--num_sub', default=1, type=int,
                     help='number of subjects used in the experiments. ')
-parser.add_argument('-batch_size', '--batch-size', default=8000, type=int,
+parser.add_argument('-batch_size', '--batch-size', default=16000, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -289,6 +289,7 @@ class IE():
 
         num = 0
         best_loss_val = np.inf
+        print("Data loader length : ", len(self.dataloader))
 
         for e in tqdm(range(self.n_epochs)):
             in_epoch = time.time()
