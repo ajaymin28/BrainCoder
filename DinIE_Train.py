@@ -448,7 +448,7 @@ def main_worker():
 
     dataset = DINOV2EEGDataset(
         args=args,
-        subject_ids=[1,2,3,4,5],  # or [1] or up to [1,2,...,10]
+        subject_ids=[1],  # or [1] or up to [1,2,...,10]
         session_ids=[0,1,2,3],    # select sessions you want for train only 4 session are avialable for Things EEG2
         subset="train",
         n_global_crops=HyperParams.GLOBAL_CROPS-1,
