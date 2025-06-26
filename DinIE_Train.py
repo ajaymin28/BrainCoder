@@ -38,6 +38,9 @@ from utils.gpu_utils import memory_stats
 from tqdm import tqdm
 import wandb
 
+OUTPUT_DIR = "/home/ja882177/EEG/gits/BrainCoder/checkpoints/sub1"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 # def load_model_for_inference(ckpt_path, eeg_encoder, img_encoder, device='cuda'):
 #     # Load your encoders
 #     model = MultiModalEncoder(eeg_encoder, img_encoder).to(device)
@@ -352,7 +355,7 @@ def main_worker():
 
     class HyperParams:
 
-        batch_size = 512
+        batch_size = 2048
         epochs = 100
 
         GLOBAL_CROPS = 2
@@ -577,8 +580,8 @@ def main_worker():
                 loss = loss / dist.get_world_size()
 
             
-            if local_rank == 0:
-                memory_stats()
+            # if local_rank == 0:
+            #     memory_stats()
 
         if local_rank == 0:
             logger.info(f"Epoch {epoch}: Loss {loss.item():.4f}")
@@ -626,7 +629,7 @@ def main_worker():
                     'optimizer': optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
                 }
-                torch.save(checkpoint, f"dinov2_ckpt_epoch{epoch}.pth")
+                torch.save(checkpoint, f"{OUTPUT_DIR}/dinov2_ckpt_epoch{epoch}.pth")
                 logger.info(f"Checkpoint saved at epoch {epoch}")
 
     checkpoint = {
@@ -636,7 +639,7 @@ def main_worker():
         'optimizer': optimizer.state_dict(),
         'scaler': scaler.state_dict(),
     }
-    torch.save(checkpoint, f"dinov2_ckpt_epoch{epoch+1}_final.pth")
+    torch.save(checkpoint, f"{OUTPUT_DIR}/dinov2_ckpt_epoch{epoch+1}_final.pth")
     cleanup_ddp()
 
 if __name__ == '__main__':

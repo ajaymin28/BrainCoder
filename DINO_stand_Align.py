@@ -36,7 +36,7 @@ parser.add_argument('--dnn', default='dinov2', type=str)
 parser.add_argument('--epoch', default='200', type=int)
 parser.add_argument('--num_sub', default=1, type=int,
                     help='number of subjects used in the experiments. ')
-parser.add_argument('-batch_size', '--batch-size', default=4096, type=int,
+parser.add_argument('-batch_size', '--batch-size', default=16000, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -129,7 +129,7 @@ class IE():
             bottleneck_dim=768
         )
         self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).cuda()
-        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/checkpoints/rare-aardvark-44/dinov2_ckpt_epoch50.pth")
+        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/checkpoints/sub1/dinov2_ckpt_epoch30.pth")
         self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"], strict=True)
 
         self.Proj_eeg = Proj_eeg(embedding_dim=1696, proj_dim=768).cuda()
@@ -296,8 +296,12 @@ class IE():
         best_loss_val = np.inf
         print("Data loader length : ", len(self.dataloader))
 
+        
         for e in tqdm(range(self.n_epochs)):
             in_epoch = time.time()
+
+            running_loss = 0
+            running_loss_val = 0
 
             # self.Enc_eeg.train()
             self.Proj_eeg.train()
@@ -354,6 +358,8 @@ class IE():
                 loss.backward()
                 self.optimizer.step()
 
+                running_loss += loss.item()
+
 
             if (e + 1) % 1 == 0:
                 self.Enc_eeg.eval()
@@ -388,13 +394,14 @@ class IE():
                         vloss_img = self.criterion_cls(vlogits_per_img, vlabels)
 
                         vloss = (vloss_eeg + vloss_img) / 2
+                        running_loss_val += vloss.item()
 
-                        # if vloss <= best_loss_val:
-                        #     best_loss_val = vloss
-                        #     best_epoch = e + 1
-                        torch.save(self.Enc_eeg.module.state_dict(), './model/' + model_idx + 'Enc_eeg_cls.pth')
-                        torch.save(self.Proj_eeg.module.state_dict(), './model/' + model_idx + 'Proj_eeg_cls.pth')
-                        torch.save(self.Proj_img.module.state_dict(), './model/' + model_idx + 'Proj_img_cls.pth')
+                        if vloss <= best_loss_val:
+                            best_loss_val = vloss
+                            best_epoch = e + 1
+                            # torch.save(self.Enc_eeg.module.state_dict(), './model/' + model_idx + 'Enc_eeg_cls.pth')
+                            torch.save(self.Proj_eeg.module.state_dict(), './model/' + model_idx + 'Proj_eeg_cls.pth')
+                            torch.save(self.Proj_img.module.state_dict(), './model/' + model_idx + 'Proj_img_cls.pth')
 
                 
                 loss_egg = loss_eeg.detach().cpu().numpy()
@@ -402,6 +409,9 @@ class IE():
 
                 vloss_eeg = vloss_eeg.detach().cpu().numpy()
                 vloss_img = vloss_img.detach().cpu().numpy()
+
+                avg_running_loss_val = running_loss_val/len(self.val_dataloader)
+                avg_running_loss = running_loss/len(self.dataloader)
 
 
                 vloss = vloss.detach().cpu().numpy()
@@ -418,10 +428,10 @@ class IE():
                     "Epoch": e if e>0 else 1,
                     "Cos eeg": loss_eeg,
                     "Cos img": loss_img,
-                    "loss": loss,
+                    "loss": avg_running_loss,
                     "Cos veeg": vloss_eeg,
                     "Cos vimg": vloss_img,
-                    "loss val": vloss,
+                    "loss val": avg_running_loss_val,
                 })
 
                 memory_stats()
