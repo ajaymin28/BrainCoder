@@ -7,6 +7,7 @@ import random
 from collections import OrderedDict
 from utils.common import TrainConfig
 from collections import defaultdict
+import copy
 
 def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_prob=0.2, min_len=150, max_len=250, crop_prob=1.0):
     """
@@ -21,11 +22,11 @@ def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_pr
     c = x.shape[1]
 
     # 1. Random Temporal Crop
-    crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
-    if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
-        if t - crop_len + 1 > 0:
-            start = torch.randint(0, t - crop_len + 1, (1,)).item()
-            x = x[:, :, start:start+crop_len]
+    # crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
+    # if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
+    #     if t - crop_len + 1 > 0:
+    #         start = torch.randint(0, t - crop_len + 1, (1,)).item()
+    #         x = x[:, :, start:start+crop_len]
 
     # 1. Additive Gaussian Noise
     if torch.rand(1) < 0.7:
@@ -71,12 +72,12 @@ def eeg_local_aug(x, min_len=100, max_len=150, noise_std=0.09, crop_prob=1.0):
     t = x.shape[-1]
     c = x.shape[1]
 
-    # 1. Random Temporal Crop
-    crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
-    if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
-        if t - crop_len + 1 > 0:
-            start = torch.randint(0, t - crop_len + 1, (1,)).item()
-            x = x[:, :, start:start+crop_len]
+    # # 1. Random Temporal Crop
+    # crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
+    # if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
+    #     if t - crop_len + 1 > 0:
+    #         start = torch.randint(0, t - crop_len + 1, (1,)).item()
+    #         x = x[:, :, start:start+crop_len]
 
     # 2. Add Gaussian Noise
     if torch.rand(1) < 0.7:
@@ -109,8 +110,8 @@ class DINOV2EEGDataset(Dataset):
         subject_ids=[1],             # List of subject numbers, e.g. [1,2,3]
         session_ids=[0],             # List of session indices (0-3)
         subset="train",
-        n_global_crops=2,
-        n_local_crops=6,
+        n_global_crops=1,
+        n_local_crops=7,
         transform_global=None,   # DINO global aug function
         transform_local=None,    # DINO local aug function
         keep_dim_after_mean=False,
@@ -151,21 +152,51 @@ class DINOV2EEGDataset(Dataset):
 
         # --- Build master index: (subject, class_idx, session_idx) for random access ---
         self.master_index = []
+        self.global_class_wise_indexes = {}
         for subject_idx, subject_id in enumerate(subject_ids):
             eegfilekey = "training" if data_key == "train" else data_key
             eeg_path = os.path.join(self.args.EEG_DATA_PATH, f"sub-{subject_id:02d}", f"preprocessed_eeg_{eegfilekey}.npy")
             eeg_dict = np.load(eeg_path, allow_pickle=True)
             eeg_data = eeg_dict['preprocessed_eeg_data'] # (1654, 4, 63, 250)
             num_classes, num_sessions = eeg_data.shape[:2]
-            for class_idx in range(num_classes):
+
+            for img_feat_idx in range(num_classes):  # total 16540 images
+                image_class_idx = img_feat_idx // 10  # 0-based class index
+
+
+                if image_class_idx not in self.global_class_wise_indexes.keys():
+                    self.global_class_wise_indexes[image_class_idx] = []
+
                 for sess in session_ids:
                     self.master_index.append({
                         "subject_idx": subject_idx,
                         "subject_id": subject_id,
-                        "class_idx": class_idx,
+                        "class_idx": image_class_idx,   # classes from 0 to 1653
                         "session_idx": sess,
-                        "sample_idx_in_file": class_idx  # as class_idx==sample_idx in file
+                        "sample_idx_in_file": img_feat_idx,   # actual feature index in file
+                        "image_file_name": self.img_file_names[img_feat_idx],
+                        "image_concept_name": self.img_concepts[img_feat_idx]
                     })
+
+                    current_master_index = len(self.master_index)-1
+
+                    self.global_class_wise_indexes[image_class_idx].append(current_master_index)
+
+
+            # for class_idx in range(num_classes):
+            #     for sess in session_ids:
+            #         self.master_index.append({
+            #             "subject_idx": subject_idx,
+            #             "subject_id": subject_id,
+            #             "class_idx": class_idx,
+            #             "session_idx": sess,
+            #             "sample_idx_in_file": class_idx  # as class_idx==sample_idx in file
+            #         })
+            #         current_master_index = len(self.master_index)
+            #         if class_idx not in self.global_class_wise_indexes.keys():
+            #             self.global_class_wise_indexes[class_idx] = []
+            #         self.global_class_wise_indexes[class_idx].append(current_master_index-1)
+
             del eeg_dict, eeg_data
             gc.collect()
 
@@ -198,30 +229,68 @@ class DINOV2EEGDataset(Dataset):
         return eeg_data
 
     def __getitem__(self, idx):
+
+        # ========== SSL Augmentations ==========
+        crops = []
+        crops_img_feats = []
+
+
         sample_info = self.master_index[idx]
         subject_id = sample_info["subject_id"]
-        class_idx = sample_info["class_idx"]
+        sample_idx_in_file = sample_info["sample_idx_in_file"]  # 0-1654
         session_idx = sample_info["session_idx"]
+        class_idx = sample_info["class_idx"]   # classes 0,1,2
 
         # Efficient subject file caching:
         eeg_data = self._get_subject_data(subject_id)
-        eeg_sample = eeg_data[class_idx, session_idx, :, :]
+        eeg_sample = eeg_data[sample_idx_in_file, session_idx, :, :]
 
         # Get image features and class id
-        image_features = self.img_features[class_idx]
-        class_id = self.class_to_id[self.img_concepts[class_idx]]
-
-        # ========== DINOv2 Augmentations ==========
-        crops = []
+        image_features = self.img_features[sample_idx_in_file]
+        # crops_img_feats.append(image_features)
+        class_id = self.class_to_id[self.img_concepts[sample_idx_in_file]]
 
         # add original sample from the current index
         crops.append(torch.tensor(eeg_sample, dtype=torch.float32))
 
 
-        # # ---- Now get Same-class Augmentations (across subject/session) ----
-        # # same_class_augs = []
+        # ---- Now get Same-class Augmentations (across subject/session) ----
+        same_class_global_sample_indexes = copy.deepcopy(self.global_class_wise_indexes[class_idx]) # contains global indexes of different subjects and sessions
+        random.shuffle(same_class_global_sample_indexes)
+
+        num_augs = min(self.n_local_crops+self.n_global_crops-1, len(same_class_global_sample_indexes))
+        # print(num_augs, len(candidates))
+        if idx in same_class_global_sample_indexes[:num_augs]:
+            num_augs +=1
+        for i in range(num_augs):
+            current_g_index = same_class_global_sample_indexes[i]
+            if current_g_index==idx:
+                continue
+
+            master_sample_info_aug = self.master_index[same_class_global_sample_indexes[i]]
+
+            aug_subject_id = master_sample_info_aug["subject_id"]
+            aug_class_idx = master_sample_info_aug["class_idx"]
+            aug_session_idx = master_sample_info_aug["session_idx"]
+            aug_eeg = self._get_subject_data(aug_subject_id)[aug_class_idx, aug_session_idx, :, :]
+            
+            # You can use transform_global or a dedicated transform for these:
+            aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
+
+            # aug_image_features = self.img_features[aug_class_idx]
+            crops.append(aug_crop)
+            # crops_img_feats.append(aug_image_features) # note, this could be same image feature of the main idx since same image is shown to different subjects
+
+
+        # # # ---- Now get Same-class Augmentations (across subject/session) ----
+        # # # same_class_augs = []
+
         # # List of (subject_id, session_idx) for the class
         # candidates = self.class_sample_lookup[class_idx].copy()
+
+        # # Get one sample from same candidate 
+        # same_candidate_samples = [(sid, sess) for (sid, sess) in candidates if (sid == subject_id and sess != session_idx)]
+
         # # Remove current (subject, session) to avoid duplicates
         # candidates = [(sid, sess) for (sid, sess) in candidates if not (sid == subject_id and sess == session_idx)]
         # random.shuffle(candidates)

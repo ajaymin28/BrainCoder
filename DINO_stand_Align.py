@@ -71,7 +71,7 @@ import numpy as np
 from archs.DinIE import MultiModalEncoder, DINOHead
 from archs.nice import Proj_img, Proj_eeg, Enc_eeg
 from archs.EEGDinoEncoder import DynamicEEG2DEncoder, EEGTSConv1DEncoder
-
+from archs.EEG1DAutoEncoder import TSConv1DResNet
 
 # Image2EEG
 class IE():
@@ -115,11 +115,12 @@ class IE():
         self.Enc_eeg = Enc_eeg().cuda()
         # self.Enc_eeg = ThingsEEGConv(channels=63,time=250,n_classes=1654,proj_dim=768).cuda()
         
-        teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768).cuda()
+        # teacher_eeg_encoder = TSConv1DResNet(proj_dim=768).cuda()
+        teacher_eeg_encoder = TSConv1DResNet(proj_dim=1696).cuda()
         # teacher_eeg_encoder = EEGTSConv1DEncoder(proj_dim=768).cuda()
-        DINO_Head_Dim = 4096
+        DINO_Head_Dim = 32768
         teacher_dino_head = DINOHead(
-            in_dim=768,                   # Feature dim from both encoders
+            in_dim=1696,                   # Feature dim from both encoders
             out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
             use_bn=False,
             norm_last_layer=True,
@@ -128,10 +129,10 @@ class IE():
             bottleneck_dim=768
         )
         self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).cuda()
-        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/model_checkpoints/sub1/chocolote-wood-32/dinov2_ckpt_epoch70.pth")
+        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/checkpoints/rare-aardvark-44/dinov2_ckpt_epoch50.pth")
         self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"], strict=True)
 
-        self.Proj_eeg = Proj_eeg(embedding_dim=768, proj_dim=768).cuda()
+        self.Proj_eeg = Proj_eeg(embedding_dim=1696, proj_dim=768).cuda()
         self.Proj_img = Proj_img(embedding_dim=768, proj_dim=768).cuda()
         # self.Proj_eeg = Proj_eeg(proj_dim=768).cuda()
         # self.Proj_img = Proj_img(proj_dim=768).cuda()
@@ -248,8 +249,8 @@ class IE():
         self.Proj_img.apply(weights_init_normal)
 
         train_img_feature_base, test_img_feature = self.get_image_data() 
-        MEAN_TRAIN_DATA = False
-        MEAN_TEST_DATA = False
+        MEAN_TRAIN_DATA = True
+        MEAN_TEST_DATA = True
         train_eeg, train_img_feature, _, _ = self.get_eeg_data(train_img_feature_base,test_img_feature, train_sessions=[0,1,2], test_sessions=[i for i in range(80)], mean_data=MEAN_TRAIN_DATA) # use seperate session for train and val
         _, _, test_eeg, test_label = self.get_eeg_data(train_img_feature_base,test_img_feature, train_sessions=None, test_sessions=[i for i in range(80)], mean_data=MEAN_TEST_DATA) # use seperate session for train and val
         val_eeg, val_img_feature, _, _ = self.get_eeg_data(train_img_feature_base,test_img_feature,train_sessions=[3], test_sessions=None, mean_data=MEAN_TRAIN_DATA) # different session for val
@@ -433,7 +434,7 @@ class IE():
         top3 = 0
         top5 = 0
 
-        self.Enc_eeg.load_state_dict(torch.load('./model/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
+        # self.Enc_eeg.load_state_dict(torch.load('./model/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
         self.Proj_eeg.load_state_dict(torch.load('./model/' + model_idx + 'Proj_eeg_cls.pth'), strict=False)
         self.Proj_img.load_state_dict(torch.load('./model/' + model_idx + 'Proj_img_cls.pth'), strict=False)
 
@@ -521,7 +522,7 @@ def main():
             project="DinoV2EEG_IMG_Align",          # your project name
             # mode="offline"
             config=dict_args,             # log all config parameters
-            notes="Pretrained sub[1] FT [sub-1] SESSION 1,2,3, pretrained weights: chocoloate-wood-32"
+            notes="Pretrained sub[1] FT [sub-1] SESSION 1,2,3, pretrained weights: rare-aardvark-44"
         )
 
         print('Subject %d' % (i+1))

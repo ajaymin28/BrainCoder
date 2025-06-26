@@ -11,7 +11,7 @@ Includes all essentials:
   - Multi-crop, multi-modal batch handling
   - Single/multi-GPU/Slurm friendly
 
-Author: OpenAI ChatGPT, Jaimin Bhoi request <--(Jaimin: I'm just gonna keep it this way, if something blows up you know whom to blame)
+Author: OpenAI ChatGPT, Jaimin Bhoi request
 """
 
 import torch
@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from utils.common import TrainConfig
 from utils.DINODatasets import DINOV2EEGDataset,DINOV2EEGDatasetKaggle, eeg_global_aug, eeg_local_aug
 from archs.EEGDinoEncoder import DINOV2EEGEncoder, DynamicEEG2DEncoder
+from archs.EEG1DAutoEncoder import TSConv1DResNet
 from utils.logman import logger
 from utils.gpu_utils import memory_stats
 from tqdm import tqdm
@@ -351,16 +352,16 @@ def main_worker():
 
     class HyperParams:
 
-        batch_size = 10240
+        batch_size = 512
         epochs = 100
 
         GLOBAL_CROPS = 2
-        LOCAL_CROPS = 4
+        LOCAL_CROPS = 6
         MIXED_PREC_TRAINING = True
         freeze_last_layer = 1
         clip_grad = 1.0
 
-        DINO_Head_Dim = 4096
+        DINO_Head_Dim = 32768
         DINO_Head_bottleneck_dim = 768
         DINO_Head_hidden_dim = 2048
         DINO_Head_nlayers = 3
@@ -386,8 +387,8 @@ def main_worker():
 
 
     # eeg_encoder = EEGEncoder(proj_dim=768).to(device)
-    teacher_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768)
-    student_eeg_encoder = DynamicEEG2DEncoder(proj_dim=768)
+    teacher_eeg_encoder = TSConv1DResNet(proj_dim=1696)
+    student_eeg_encoder = TSConv1DResNet(proj_dim=1696)
 
     # teacher_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
     # student_eeg_encoder = DINOV2EEGEncoder(proj_dim=768)  # or your DINO head dimension
@@ -398,7 +399,7 @@ def main_worker():
     # head
     # default args in dino (in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048, bottleneck_dim=256)
     teacher_dino_head = DINOHead(
-        in_dim=768,                   # Feature dim from both encoders
+        in_dim=1696,                   # Feature dim from both encoders
         out_dim=HyperParams.DINO_Head_Dim,        # Embedding dim for DINO loss
         use_bn=HyperParams.DINO_Head_use_bn,
         norm_last_layer=HyperParams.DINO_Head_norm_last_layer,
@@ -408,7 +409,7 @@ def main_worker():
     )
 
     student_dino_head = DINOHead(
-        in_dim=768,                   # Feature dim from both encoders
+        in_dim=1696,                   # Feature dim from both encoders
         out_dim=HyperParams.DINO_Head_Dim,        # Embedding dim for DINO loss
         use_bn=HyperParams.DINO_Head_use_bn,
         norm_last_layer=HyperParams.DINO_Head_norm_last_layer,
@@ -447,14 +448,14 @@ def main_worker():
 
     dataset = DINOV2EEGDataset(
         args=args,
-        subject_ids=[1],  # or [1] or up to [1,2,...,10]
-        session_ids=[0,1,2],    # select sessions you want for train only 4 session are avialable for Things EEG2
+        subject_ids=[1,2,3,4,5],  # or [1] or up to [1,2,...,10]
+        session_ids=[0,1,2,3],    # select sessions you want for train only 4 session are avialable for Things EEG2
         subset="train",
-        n_global_crops=HyperParams.GLOBAL_CROPS,
-        n_local_crops=HyperParams.LOCAL_CROPS,
+        n_global_crops=HyperParams.GLOBAL_CROPS-1,
+        n_local_crops=HyperParams.LOCAL_CROPS+1,
         transform_global=eeg_global_aug,
         transform_local=eeg_local_aug,
-        max_cache_size=10
+        max_cache_size=5
     )
 
     if is_ddp():
@@ -510,7 +511,8 @@ def main_worker():
         )
 
 
-    
+    if local_rank == 0:
+        memory_stats()
 
     best_loss = float('inf')
     it_global = 0
@@ -523,9 +525,8 @@ def main_worker():
 
         torch.cuda.reset_peak_memory_stats("cuda") 
         for it, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-            crops = batch['crops']
-            # crop_types = ['eeg'] * len(crops) # all eeg here for img pass img string for respective sample index
-            # crop_types = batch['crop_types']
+            crops = batch['crops']   # 1 + ncrops
+
             it_global = epoch * len(dataloader) + it
 
             # Update optimizer LR and WD
@@ -536,12 +537,13 @@ def main_worker():
 
             # crops = [c.cuda() for c in crops]
             crops = [c.cuda(non_blocking=True) for c in crops]
-            global_crops = []
-            local_crops = []
-            for i in range(HyperParams.GLOBAL_CROPS):
-                global_crops.append(eeg_global_aug(crops[0]))
-            for j in range(HyperParams.LOCAL_CROPS):
-                local_crops.append(eeg_local_aug(crops[0]))     
+            global_crops = crops[:2]
+            local_crops = crops
+
+            # for i in range(HyperParams.GLOBAL_CROPS):
+            #     global_crops.append(crops[:2])
+            # for j in range(HyperParams.LOCAL_CROPS):
+            #     local_crops.append(crops[j])     
 
             if HyperParams.MIXED_PREC_TRAINING:
                 with torch.amp.autocast(device_type="cuda"):
@@ -573,6 +575,10 @@ def main_worker():
             if is_ddp():
                 dist.all_reduce(loss, op=dist.ReduceOp.SUM)
                 loss = loss / dist.get_world_size()
+
+            
+            if local_rank == 0:
+                memory_stats()
 
         if local_rank == 0:
             logger.info(f"Epoch {epoch}: Loss {loss.item():.4f}")
