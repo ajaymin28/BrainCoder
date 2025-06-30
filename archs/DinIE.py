@@ -253,6 +253,26 @@ class DINOHead(nn.Module):
         x = self.last_layer(x)
         return x
 
+# --- Good Image Encoder (ViT, DINOv2 friendly) ---
+from timm.models.vision_transformer import vit_base_patch16_224
+class ImageEncoder(nn.Module):
+    def __init__(self, proj_dim=768, vit_ckpt=None):
+        super().__init__()
+        # Use ViT-Base (DINOv2's default backbone). Requires timm
+        self.vit = vit_base_patch16_224(pretrained=True if vit_ckpt is None else False)
+        if vit_ckpt is not None:
+            state = torch.load(vit_ckpt, map_location='cpu')
+            self.vit.load_state_dict(state, strict=False)
+        self.proj = nn.Sequential(
+            nn.Linear(self.vit.embed_dim, proj_dim),
+            nn.LayerNorm(proj_dim)
+        )
+    def forward(self, x):
+        # x: (B, 3, H, W), any H/W
+        features = self.vit.forward_features(x)  # (B, embed_dim)
+        features = self.proj(features)
+        return features
+
 # --- Shared Multi-modal Wrapper ---
 class MultiModalEncoder(nn.Module):
     def __init__(self, eeg_encoder, img_encoder, dino_head):
@@ -261,9 +281,32 @@ class MultiModalEncoder(nn.Module):
         self.img_encoder = img_encoder
         self.dino_head = dino_head
 
+        self.Tensor = torch.cuda.FloatTensor
+        self.LongTensor = torch.cuda.LongTensor
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda()
+        self.criterion_cls = torch.nn.CrossEntropyLoss().cuda()
+
+
+    def nice_contrastive_loss(self, eeg_features, img_features):
+        vlabels = torch.arange(eeg_features.shape[0])
+        vlabels = vlabels.cuda().type(self.LongTensor)
+
+        eeg_features = eeg_features / eeg_features.norm(dim=1, keepdim=True)
+        img_features = img_features / img_features.norm(dim=1, keepdim=True)
+
+        logit_scale = self.logit_scale.exp()
+        logits_per_eeg = logit_scale * eeg_features @ img_features.t()
+        logits_per_img = logits_per_eeg.t()
+
+        loss_eeg = self.criterion_cls(logits_per_eeg, vlabels)
+        loss_img = self.criterion_cls(logits_per_img, vlabels)
+        loss = (loss_eeg + loss_img) / 2
+
+        return loss
+    
     def forward(self, crops, crop_types=None, get_dino_head=True):
         outs = []
-
+        base_feats = []
         if type(crops)==list:
             for i, crop in enumerate(crops):
                 ctype = None
@@ -278,20 +321,21 @@ class MultiModalEncoder(nn.Module):
                         raise ValueError(f"Unknown crop shape: {crop.shape}")
                 if ctype == 'eeg':
                     feat = self.eeg_encoder(crop)
+                    base_feats.append(feat)
                 elif ctype == 'img':
                     feat = self.img_encoder(crop)
+                    base_feats.append(feat)
                 else:
                     raise ValueError(f"Unknown crop type: {ctype}")
                 
                 if get_dino_head:
                     out = self.dino_head(feat)
                     outs.append(out)
-                else: 
-                    outs.append(feat)
+                    
         else:
             ctype = None
             if crop_types is not None:
-                ctype = crop_types[i]
+                ctype = crop_types[0]
             else:
                 if crop.dim() == 3:
                     ctype = 'eeg'
@@ -309,7 +353,8 @@ class MultiModalEncoder(nn.Module):
             if get_dino_head:
                 out = self.dino_head(feat)
                 outs.append(out)
-            else: 
-                outs.append(feat)
 
-        return outs
+        return outs, base_feats
+    
+
+

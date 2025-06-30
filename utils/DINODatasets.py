@@ -9,98 +9,123 @@ from utils.common import TrainConfig
 from collections import defaultdict
 import copy
 
-def eeg_global_aug(x, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5, mask_prob=0.2, min_len=150, max_len=250, crop_prob=1.0):
-    """
-    EEG sample (channels, time) or (batch, channels, time)
-    """
-    orig_shape = x.shape
-    is_batch = (x.dim() == 3)
-    if not is_batch:
-        x = x.unsqueeze(0)  # Add batch dim: (1, C, T)
 
-    t = x.shape[-1]
-    c = x.shape[1]
+def ft_surrogate_eeg(eeg: np.ndarray) -> np.ndarray:
+    n_channels, t_current = eeg.shape
+    fft_data = np.fft.fft(eeg, axis=-1)
+    amplitude = np.abs(fft_data)
+    phase = np.angle(fft_data)
+    random_phases = np.zeros_like(phase)
+    half = t_current // 2
+    np.random.seed(np.random.randint(0,500)) # make the random actually random, else seed will fix it
+    if t_current % 2 == 0:
+        random_phases[:, 0] = 0
+        random_phases[:, half] = 0
+        rand_vals = np.random.uniform(0, 2 * np.pi, (n_channels, half - 1))
+        random_phases[:, 1:half] = rand_vals
+        random_phases[:, half+1:] = -rand_vals[:, ::-1]
+    else:
+        random_phases[:, 0] = 0
+        rand_vals = np.random.uniform(0, 2 * np.pi, (n_channels, half))
+        random_phases[:, 1:half+1] = rand_vals
+        random_phases[:, half+1:] = -rand_vals[:, ::-1]
+    new_spectrum = amplitude * np.exp(1j * random_phases)
+    surrogate = np.fft.ifft(new_spectrum, axis=-1).real
+    return surrogate.astype(eeg.dtype)
+
+def eeg_global_aug(
+    x: np.ndarray, noise_std=0.05, jitter_prob=0.5, scaling_prob=0.5,
+    mask_prob=0.2, min_len=200, max_len=230, crop_prob=1.0,
+    ft_surrogate_prob=0.7
+):
+    """
+    EEG sample augmentation with cropping, noise, masking, and FT surrogate.
+    Input:
+        x: np.ndarray, shape (n_channels, t)
+    Returns:
+        Augmented np.ndarray
+    """
+
+    np.random.seed(np.random.randint(0,500)) # make the random actually random, else seed will fix it
+
+    n_channels, t = x.shape
+    x_aug = np.copy(x)
 
     # 1. Random Temporal Crop
-    # crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
-    # if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
-    #     if t - crop_len + 1 > 0:
-    #         start = torch.randint(0, t - crop_len + 1, (1,)).item()
-    #         x = x[:, :, start:start+crop_len]
+    crop_len = np.random.randint(min_len, max_len + 1)
+    if crop_prob >= 1.0 or np.random.rand() < crop_prob:
+        if t > crop_len:
+            start = np.random.randint(0, t - crop_len + 1)
+            x_aug = x_aug[:, start:start + crop_len]
+        else:
+            crop_len = t  # fallback, no crop
 
-    # 1. Additive Gaussian Noise
-    if torch.rand(1) < 0.7:
-        x = x + torch.randn_like(x) * noise_std
+    # 2. Additive Gaussian Noise
+    if np.random.rand() < 0.7:
+        x_aug = x_aug + np.random.randn(*x_aug.shape) * noise_std
 
-    # # 2. Channel Dropout
-    # if torch.rand(1) < 0.5:
-    #     # mask shape: (channels,)
-    #     mask = (torch.rand(x.shape[1], device=x.device) > mask_prob).float()
-    #     x = x * mask.unsqueeze(0).unsqueeze(-1)
+    # 3. FT Surrogate
+    if np.random.rand() < ft_surrogate_prob:
+        x_aug = ft_surrogate_eeg(x_aug)
 
-    # # 3. Time Jitter (random roll)
-    # if torch.rand(1) < jitter_prob:
-    #     shift = torch.randint(-15, 16, (1,)).item()
-    #     x = torch.roll(x, shifts=shift, dims=-1)
+    # 4. Random Temporal Masking
+    if np.random.rand() < mask_prob:
+        min_mask_len, max_mask_len = 10,30
+        t_current = x_aug.shape[-1]
+        mask_len = min(np.random.randint(min_mask_len, max_mask_len + 1), t_current)
+        if t_current > mask_len:
+            start = np.random.randint(0, t_current - mask_len + 1)
+            x_aug[..., start:start + mask_len] = 0
 
-    # # 4. Channel-wise Scaling (multiplicative noise)
-    # if torch.rand(1) < scaling_prob:
-    #     scale = 1.0 + (torch.randn(x.shape[1], device=x.device) * 0.1)
-    #     x = x * scale.unsqueeze(0).unsqueeze(-1)
+    return x_aug
 
-    # # 5. Random Temporal Masking
-    # if torch.rand(1) < 0.5:
-    #     t = x.shape[-1]
-    #     mask_len = torch.randint(10, 40, (1,)).item()
-    #     if t - mask_len > 0:
-    #         start = torch.randint(0, t - mask_len, (1,)).item()
-    #         x[..., start:start+mask_len] = 0
 
-    if not is_batch:
-        x = x.squeeze(0)  # Remove batch dim
-    return x
-
-def eeg_local_aug(x, min_len=100, max_len=150, noise_std=0.09, crop_prob=1.0):
+def eeg_local_aug(
+    x: np.ndarray, noise_std=0.09, jitter_prob=0.5, scaling_prob=0.5,
+    mask_prob=0.2, min_len=165, max_len=200, crop_prob=1.0,
+    ft_surrogate_prob=0.7, random_seed=None
+):
     """
-    EEG sample (channels, time) or (batch, channels, time)
+    EEG sample augmentation with cropping, noise, masking, and FT surrogate.
+    Local crops should have smaller time window
+    Input:
+        x: np.ndarray, shape (n_channels, t)
+    Returns:
+        Augmented np.ndarray
     """
-    orig_shape = x.shape
-    is_batch = (x.dim() == 3)
-    if not is_batch:
-        x = x.unsqueeze(0)
 
-    t = x.shape[-1]
-    c = x.shape[1]
+    np.random.seed(np.random.randint(0,500)) # make the random actually random, else seed will fix it
 
-    # # 1. Random Temporal Crop
-    # crop_len = torch.randint(min_len, max_len + 1, (1,)).item()
-    # if crop_prob >= 1.0 or torch.rand(1) < crop_prob:
-    #     if t - crop_len + 1 > 0:
-    #         start = torch.randint(0, t - crop_len + 1, (1,)).item()
-    #         x = x[:, :, start:start+crop_len]
+    n_channels, t = x.shape
+    x_aug = np.copy(x)
 
-    # 2. Add Gaussian Noise
-    if torch.rand(1) < 0.7:
-        x = x + torch.randn_like(x) * noise_std
+    # 1. Random Temporal Crop
+    crop_len = np.random.randint(min_len, max_len + 1)
+    if crop_prob >= 1.0 or np.random.rand() < crop_prob:
+        if t > crop_len:
+            start = np.random.randint(0, t - crop_len + 1)
+            x_aug = x_aug[:, start:start + crop_len]
+        else:
+            crop_len = t  # fallback, no crop
 
-    # # 3. Small Channel Scaling
-    # if torch.rand(1) < 0.5:
-    #     scale = 1.0 + (torch.randn(c, device=x.device) * 0.05)
-    #     x = x * scale.unsqueeze(0).unsqueeze(-1)
+    # 2. Additive Gaussian Noise
+    if np.random.rand() < 0.7:
+        x_aug = x_aug + np.random.randn(*x_aug.shape) * noise_std
 
-    # 5. Random Temporal Masking
-    if torch.rand(1) < 0.5:
-        t = x.shape[-1]
-        mask_len = torch.randint(10, 40, (1,)).item()
-        if t - mask_len > 0:
-            start = torch.randint(0, t - mask_len, (1,)).item()
-            x[..., start:start+mask_len] = 0
+    # 3. FT Surrogate
+    if np.random.rand() < ft_surrogate_prob:
+        x_aug = ft_surrogate_eeg(x_aug)
 
-    if not is_batch:
-        x = x.squeeze(0)
-    return x
+    # 4. Random Temporal Masking
+    if np.random.rand() < mask_prob:
+        min_mask_len, max_mask_len = 10,30
+        t_current = x_aug.shape[-1]
+        mask_len = min(np.random.randint(min_mask_len, max_mask_len + 1), t_current)
+        if t_current > mask_len:
+            start = np.random.randint(0, t_current - mask_len + 1)
+            x_aug[..., start:start + mask_len] = 0
 
-
+    return x_aug
 
 
 class DINOV2EEGDataset(Dataset):
@@ -117,7 +142,8 @@ class DINOV2EEGDataset(Dataset):
         keep_dim_after_mean=False,
         mean_eeg_data=False,
         seed=42,
-        max_cache_size=2  # <- How many subject files to keep in RAM per worker
+        max_cache_size=2,  # <- How many subject files to keep in RAM per worker
+        sample_cross_session_subjects=False
     ):
         super().__init__()
         self.args = args
@@ -134,6 +160,7 @@ class DINOV2EEGDataset(Dataset):
         self.max_cache_size = max_cache_size
         self._file_cache = OrderedDict()  # subject_id -> eeg_data np.array
         self.n_same_class_aug = n_local_crops + n_global_crops
+        self.sample_cross_session_subjects = sample_cross_session_subjects
 
         # --- Load image metadata & features (shared for all subjects) ---
         img_meta_dir = os.path.join(args.DATA_BASE_DIR, "Data", "Things-EEG2", 'Image_set')
@@ -232,7 +259,7 @@ class DINOV2EEGDataset(Dataset):
 
         # ========== SSL Augmentations ==========
         crops = []
-        crops_img_feats = []
+        # crops_img_feats = []
 
 
         sample_info = self.master_index[idx]
@@ -250,62 +277,86 @@ class DINOV2EEGDataset(Dataset):
         # crops_img_feats.append(image_features)
         class_id = self.class_to_id[self.img_concepts[sample_idx_in_file]]
 
-        # add original sample from the current index
-        crops.append(torch.tensor(eeg_sample, dtype=torch.float32))
+        crops.append(eeg_sample)
 
+        if self.sample_cross_session_subjects:
 
-        # ---- Now get Same-class Augmentations (across subject/session) ----
-        same_class_global_sample_indexes = copy.deepcopy(self.global_class_wise_indexes[class_idx]) # contains global indexes of different subjects and sessions
-        random.shuffle(same_class_global_sample_indexes)
+            # ---- Now get Same-class Augmentations (across subject/session) ----
+            same_class_global_sample_indexes = copy.deepcopy(self.global_class_wise_indexes[class_idx]) # contains global indexes of different subjects and sessions
+            random.shuffle(same_class_global_sample_indexes)
+            # num_augs = min(self.n_local_crops+self.n_global_crops-1, len(same_class_global_sample_indexes))
+            # print(num_augs, len(candidates))
+            # if idx in same_class_global_sample_indexes[:num_augs]:
+                # num_augs +=1
 
-        num_augs = min(self.n_local_crops+self.n_global_crops-1, len(same_class_global_sample_indexes))
-        # print(num_augs, len(candidates))
-        if idx in same_class_global_sample_indexes[:num_augs]:
-            num_augs +=1
-        for i in range(num_augs):
-            current_g_index = same_class_global_sample_indexes[i]
-            if current_g_index==idx:
-                continue
+            ## For Auto Encoder
+            for i in range(2):
+                
+                current_g_index = same_class_global_sample_indexes[i]
+                if current_g_index==idx:
+                    continue # in case of same sample
+                
+                master_sample_info_aug = self.master_index[same_class_global_sample_indexes[i]]
+                aug_subject_id = master_sample_info_aug["subject_id"]
+                aug_class_idx = master_sample_info_aug["class_idx"]
+                aug_session_idx = master_sample_info_aug["session_idx"]
+                aug_eeg = self._get_subject_data(aug_subject_id)[aug_class_idx, aug_session_idx, :, :]
+                crops.append(aug_eeg)
+                break
 
-            master_sample_info_aug = self.master_index[same_class_global_sample_indexes[i]]
+            # # add original sample from the current index
+            # crops.append(eeg_sample)
 
-            aug_subject_id = master_sample_info_aug["subject_id"]
-            aug_class_idx = master_sample_info_aug["class_idx"]
-            aug_session_idx = master_sample_info_aug["session_idx"]
-            aug_eeg = self._get_subject_data(aug_subject_id)[aug_class_idx, aug_session_idx, :, :]
+            # for i in range(self.n_local_crops + self.n_global_crops):
+                
+            #     current_g_index = same_class_global_sample_indexes[i]
+            #     if current_g_index==idx:
+            #         continue
+
+            #     # master_sample_info_aug = self.master_index[same_class_global_sample_indexes[i]]
+            #     # aug_subject_id = master_sample_info_aug["subject_id"]
+            #     # aug_class_idx = master_sample_info_aug["class_idx"]
+            #     # aug_session_idx = master_sample_info_aug["session_idx"]
+            #     # aug_eeg = self._get_subject_data(aug_subject_id)[aug_class_idx, aug_session_idx, :, :]
             
-            # You can use transform_global or a dedicated transform for these:
-            aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
+            #     # You can use transform_global or a dedicated transform for these:
+            #     # aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
 
-            # aug_image_features = self.img_features[aug_class_idx]
-            crops.append(aug_crop)
-            # crops_img_feats.append(aug_image_features) # note, this could be same image feature of the main idx since same image is shown to different subjects
+            #     if len(crops)<self.n_global_crops:
+            #         crops.append(eeg_global_aug(eeg_sample))
+            #     else:
+            #         # TODO get from different session/subject? 
 
+            #         crops.append(eeg_local_aug(eeg_sample))
 
-        # # # ---- Now get Same-class Augmentations (across subject/session) ----
-        # # # same_class_augs = []
+            #     # aug_image_features = self.img_features[aug_class_idx]
+            #     # crops.append(aug_eeg)
+            #     # crops_img_feats.append(aug_image_features) # note, this could be same image feature of the main idx since same image is shown to different subjects
 
-        # # List of (subject_id, session_idx) for the class
-        # candidates = self.class_sample_lookup[class_idx].copy()
+            # # # ---- Now get Same-class Augmentations (across subject/session) ----
+            # # # same_class_augs = []
 
-        # # Get one sample from same candidate 
-        # same_candidate_samples = [(sid, sess) for (sid, sess) in candidates if (sid == subject_id and sess != session_idx)]
+            # # List of (subject_id, session_idx) for the class
+            # candidates = self.class_sample_lookup[class_idx].copy()
 
-        # # Remove current (subject, session) to avoid duplicates
-        # candidates = [(sid, sess) for (sid, sess) in candidates if not (sid == subject_id and sess == session_idx)]
-        # random.shuffle(candidates)
+            # # Get one sample from same candidate 
+            # same_candidate_samples = [(sid, sess) for (sid, sess) in candidates if (sid == subject_id and sess != session_idx)]
 
-        # num_augs = min(self.n_same_class_aug, len(candidates))
-        # # print(num_augs, len(candidates))
-        # for i in range(num_augs):
-        #     aug_subj, aug_sess = candidates[i]
-        #     aug_eeg = self._get_subject_data(aug_subj)[class_idx, aug_sess, :, :]
-        #     # You can use transform_global or a dedicated transform for these:
-        #     aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
-        #     crops.append(aug_crop)
+            # # Remove current (subject, session) to avoid duplicates
+            # candidates = [(sid, sess) for (sid, sess) in candidates if not (sid == subject_id and sess == session_idx)]
+            # random.shuffle(candidates)
+
+            # num_augs = min(self.n_same_class_aug, len(candidates))
+            # # print(num_augs, len(candidates))
+            # for i in range(num_augs):
+            #     aug_subj, aug_sess = candidates[i]
+            #     aug_eeg = self._get_subject_data(aug_subj)[class_idx, aug_sess, :, :]
+            #     # You can use transform_global or a dedicated transform for these:
+            #     aug_crop = torch.tensor(aug_eeg, dtype=torch.float32) 
+            #     crops.append(aug_crop)
 
         return {
-            "crops": crops,
+            "eeg": crops[0] if len(crops)==1 else crops,
             "class_id": class_id,
             "image_features": image_features,
             "subject_id": subject_id,
@@ -427,7 +478,8 @@ class DINOV2EEGDatasetKaggle(Dataset):
         crops = []
 
         # add original sample from the current index
-        crops.append(torch.tensor(eeg_sample, dtype=torch.float32))
+        # crops.append(torch.tensor(eeg_sample, dtype=torch.float32))
+        crops.append(eeg_global_aug(eeg_sample))
 
 
         # # ---- Now get Same-class Augmentations (across subject/session) ----

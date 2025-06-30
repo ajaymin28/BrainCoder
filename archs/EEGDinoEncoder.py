@@ -159,9 +159,126 @@ class DINOV2EEGEncoder(nn.Module):
         features = self.encoder(x)
         proj = self.proj_head(features)
         return proj
-    
 
-class DynamicEEG2DEncoder(nn.Module):
+class DynamicEEG2DEncoder(nn.Module): 
+    def __init__(self, proj_dim=768, drop_proj=0.5):
+        super().__init__()
+
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),  # (B, 64, C, T)
+            nn.BatchNorm2d(64),
+            nn.ELU(),
+            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1), # (B, 32, C, T)
+            nn.BatchNorm2d(32),
+            nn.ELU(),
+            nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1), # (B, 16, C, T)
+            nn.BatchNorm2d(16),
+            nn.ELU(),
+            nn.Conv2d(16, 8, kernel_size=3, stride=1, padding=1), # (B, 4, C, T)
+            nn.BatchNorm2d(8),
+            nn.ELU(),
+        )
+        # Global pooling: output is always (B, 32,32)
+        self.global_pool = nn.AdaptiveAvgPool2d((32,32))  # (B, 4, 63, 100)
+
+
+        # self.encoder = nn.Sequential(
+        #     nn.Conv2d(1, 64, kernel_size=(5,7), stride=(1,2), padding=(2,3)),  # (B, 64, C, T//2)
+        #     nn.BatchNorm2d(64),
+        #     nn.ELU(),
+        #     nn.Dropout(0.25),
+        #     nn.LayerNorm([64, 63, 125]),      # Estimate based on input (B, 64, 63, 50)
+            
+        #     nn.Conv2d(64, 32, kernel_size=(3,5), stride=(1,2), padding=(1,2)),  # (B, 32, C, T//4)
+        #     nn.BatchNorm2d(32),
+        #     nn.ELU(),
+        #     nn.Dropout(0.25),
+        #     nn.LayerNorm([32, 63, 63]),      # Update this if input size changes
+            
+        #     nn.Conv2d(32, 32, kernel_size=(3,3), stride=(1,2), padding=(1,1)),  # (B, 32, C, T//8)
+        #     nn.BatchNorm2d(32),
+        #     nn.ELU(),
+        #     nn.Dropout(0.25),
+        #     nn.LayerNorm([32, 63, 32]),      # Update if input size is different
+        # )
+        # self.global_pool = nn.AdaptiveAvgPool2d((1,32))
+
+
+        self.flatten = nn.Flatten(1)
+        self.feature_head = nn.Sequential(
+            nn.Linear(1024, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            ResidualAdd(nn.Sequential(
+                nn.GELU(),
+                nn.Linear(proj_dim, proj_dim),
+                nn.Dropout(drop_proj),
+            )),
+        )
+
+        self.Tensor = torch.cuda.FloatTensor
+        self.LongTensor = torch.cuda.LongTensor
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)).cuda()
+        self.criterion_cls = torch.nn.CrossEntropyLoss().cuda()
+
+    def nice_contrastive_loss(self, eeg_features, img_features):
+        vlabels = torch.arange(eeg_features.shape[0])
+        vlabels = vlabels.cuda().type(self.LongTensor)
+
+        eeg_features = eeg_features / eeg_features.norm(dim=1, keepdim=True)
+        img_features = img_features / img_features.norm(dim=1, keepdim=True)
+
+        logit_scale = self.logit_scale.exp()
+        logits_per_eeg = logit_scale * eeg_features @ img_features.t()
+        logits_per_img = logits_per_eeg.t()
+
+        loss_eeg = self.criterion_cls(logits_per_eeg, vlabels)
+        loss_img = self.criterion_cls(logits_per_img, vlabels)
+        loss = (loss_eeg + loss_img) / 2
+
+        return loss
+
+    def forward(self, x):
+        # x: (B, 1, C, T) with variable C and T across batches (but fixed within batch)
+        
+        # # For 2D Conv
+        # if len(x.shape)==3:
+        #     # batch, channel, time
+        #     x = x.unsqueeze(1) # add extra channel dim batch, 1, channel, time
+
+        # For 1D Conv
+        if len(x.shape) == 4:
+            x = x.squeeze(1)
+
+        # # print("x", x.shape)
+        # z = self.tsconv(x)
+        # # print("tsconv", z.shape)
+        # z = self.global_pool(z)
+        # # print("global_pool", z.shape)
+
+        z = self.tsconv_1d(x)
+        z = self.global_pool_1d(z)
+
+        # z = self.flatten(z)
+        # # print("flatten", z.shape)
+        # z = self.feature_head(z)
+        # # print("feature_head", z.shape)
+        
+        # # print("in size", x.shape)
+        # z = self.encoder(x)
+        # # print("encoder", z.shape)
+        # z = self.global_pool(z)
+        # # print("global_pool", z.shape)
+        # z = self.tsconv(z)
+        # print("tsconv", z.shape)
+        z = self.flatten(z)
+        # print("flatten", z.shape)
+        z = self.feature_head(z)
+        # print("feature_head", z.shape)
+        return z
+
+
+
+class DynamicEEG1DEncoder(nn.Module):
     def __init__(self, proj_dim=768, drop_proj=0.5):
         super().__init__()
 

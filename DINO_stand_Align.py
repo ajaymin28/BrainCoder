@@ -28,7 +28,7 @@ gpus = [0]
 os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(map(str, gpus))
 result_path = 'results' 
-model_idx = 'likely-armadillo-64'
+model_idx = 'EEGTransformer'
 # checkpoints\likely-armadillo-64
  
 parser = argparse.ArgumentParser(description='Experiment Stimuli Recognition test with CLIP encoder')
@@ -36,7 +36,7 @@ parser.add_argument('--dnn', default='dinov2', type=str)
 parser.add_argument('--epoch', default='200', type=int)
 parser.add_argument('--num_sub', default=1, type=int,
                     help='number of subjects used in the experiments. ')
-parser.add_argument('-batch_size', '--batch-size', default=16000, type=int,
+parser.add_argument('-batch_size', '--batch-size', default=4096, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -68,10 +68,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from archs.DinIE import MultiModalEncoder, DINOHead
+from archs.DinIE import MultiModalEncoder, DINOHead, DinIE
 from archs.nice import Proj_img, Proj_eeg, Enc_eeg
-from archs.EEGDinoEncoder import DynamicEEG2DEncoder, EEGTSConv1DEncoder
+from archs.EEGDinoEncoder import DynamicEEG1DEncoder, EEGTSConv1DEncoder
 from archs.EEG1DAutoEncoder import TSConv1DResNet
+from archs.EEGConvTranspose1D import ThingsEEGConv, EEGTSConv
+from utils.losses import SigLIPLoss
+from archs.lstm import DynamicLSTM
+from archs.EEGTransformer import EEGTransformer
 
 # Image2EEG
 class IE():
@@ -112,28 +116,38 @@ class IE():
         self.criterion_l1 = torch.nn.L1Loss().cuda()
         self.criterion_l2 = torch.nn.MSELoss().cuda()
         self.criterion_cls = torch.nn.CrossEntropyLoss().cuda()
-        self.Enc_eeg = Enc_eeg().cuda()
+        self.criterion_siglip = SigLIPLoss().cuda()
+        # self.Enc_eeg = Enc_eeg().cuda()
         # self.Enc_eeg = ThingsEEGConv(channels=63,time=250,n_classes=1654,proj_dim=768).cuda()
         
         # teacher_eeg_encoder = TSConv1DResNet(proj_dim=768).cuda()
-        teacher_eeg_encoder = TSConv1DResNet(proj_dim=1696).cuda()
-        # teacher_eeg_encoder = EEGTSConv1DEncoder(proj_dim=768).cuda()
+        # teacher_eeg_encoder = TSConv1DResNet(proj_dim=1696).cuda()
+        # teacher_eeg_encoder = DynamicEEG1DEncoder(proj_dim=1024)
+        # teacher_eeg_encoder = EEGTSConv1DEncoder(proj_dim=1024).cuda()
+        # teacher_eeg_encoder = ThingsEEGConv(channels=63, time=250,n_classes=None,proj_dim=1024)
+        # teacher_eeg_encoder = EEGTSConv(channels=63,time=250,proj_dim=1024)
+        # teacher_eeg_encoder = DinIE(channels=63, time=250,proj_dim=1024)
+        # teacher_eeg_encoder = DynamicLSTM(channels=63,time=250,num_layers=2,hidden_size=64,proj_dim=768,use_layer="output") # hidden, cell, output
+        teacher_eeg_encoder = EEGTransformer(channels=63,time=250,patch_size=20,embed_dim=63,num_heads=3,num_layers=4,drop_trans=0.3,proj_dim=768,drop_proj=0.5)
         DINO_Head_Dim = 32768
-        teacher_dino_head = DINOHead(
-            in_dim=1696,                   # Feature dim from both encoders
-            out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
-            use_bn=False,
-            norm_last_layer=True,
-            nlayers=3,
-            hidden_dim=2048,
-            bottleneck_dim=768
-        )
+        teacher_dino_head = None
+        # teacher_dino_head = DINOHead(
+        #     in_dim=768,                   # Feature dim from both encoders
+        #     out_dim=DINO_Head_Dim,        # Embedding dim for DINO loss
+        #     use_bn=False,
+        #     norm_last_layer=True,
+        #     nlayers=3,
+        #     hidden_dim=2048,
+        #     bottleneck_dim=768
+        # )
         self.Enc_eeg = MultiModalEncoder(teacher_eeg_encoder, img_encoder=None, dino_head=teacher_dino_head).cuda()
-        loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/checkpoints/sub1/dinov2_ckpt_epoch30.pth")
-        self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"], strict=True)
-
-        self.Proj_eeg = Proj_eeg(embedding_dim=1696, proj_dim=768).cuda()
+        # loaded_dict = torch.load(f"/home/ja882177/EEG/gits/BrainCoder/checkpoints/sub1/single_sesssion_aug_only_dinoloss_localcrop_update/dinov2_ckpt_epoch20.pth")
+        # self.Enc_eeg.load_state_dict(loaded_dict["model_teacher"], strict=True)
+        self.Proj_eeg = Proj_eeg(embedding_dim=768, proj_dim=768).cuda()
         self.Proj_img = Proj_img(embedding_dim=768, proj_dim=768).cuda()
+        # self.Proj_eeg.load_state_dict(loaded_dict["eeg_proj"], strict=True)
+
+
         # self.Proj_eeg = Proj_eeg(proj_dim=768).cuda()
         # self.Proj_img = Proj_img(proj_dim=768).cuda()
         self.Enc_eeg = nn.DataParallel(self.Enc_eeg, device_ids=[i for i in range(len(gpus))])
@@ -244,7 +258,7 @@ class IE():
 
     def train(self):
         
-        # self.Enc_eeg.apply(weights_init_normal)
+        self.Enc_eeg.apply(weights_init_normal)
         self.Proj_eeg.apply(weights_init_normal)
         self.Proj_img.apply(weights_init_normal)
 
@@ -286,11 +300,21 @@ class IE():
         test_dataset = torch.utils.data.TensorDataset(test_eeg, test_label)
         self.test_dataloader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=self.batch_size_test, shuffle=False)
 
-        # Optimizers
-        self.optimizer = torch.optim.Adam(itertools.chain(self.Proj_eeg.parameters(), self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
+        # # Optimizers
+        self.optimizer = torch.optim.Adam(itertools.chain(
+                                                        # self.criterion_siglip.parameters(), 
+                                                        self.Enc_eeg.parameters(),
+                                                          self.Proj_eeg.parameters(), 
+                                                          self.Proj_img.parameters()), lr=self.lr, betas=(self.b1, self.b2))
 
         for name, param in self.Enc_eeg.named_parameters():
-            param.requires_grad = False
+            param.requires_grad = True
+
+        for name, param in self.Proj_eeg.named_parameters():
+            param.requires_grad = True
+
+        for name, param in self.Proj_img.named_parameters():
+            param.requires_grad = True
 
         num = 0
         best_loss_val = np.inf
@@ -303,7 +327,7 @@ class IE():
             running_loss = 0
             running_loss_val = 0
 
-            # self.Enc_eeg.train()
+            self.Enc_eeg.train()
             self.Proj_eeg.train()
             self.Proj_img.train()
 
@@ -319,9 +343,9 @@ class IE():
                 labels = labels.cuda().type(self.LongTensor)
 
                 # obtain the features
-                with torch.no_grad():
-                    eeg_features = self.Enc_eeg([eeg],  ['eeg'], get_dino_head=False)
-                    eeg_features = torch.stack(eeg_features, dim=0).view(eeg.size(0), -1)
+                # with torch.no_grad():
+                _, base_features = self.Enc_eeg([eeg],  ['eeg'], get_dino_head=False)
+                eeg_features = torch.stack(base_features, dim=0).view(eeg.size(0), -1)
                 # eeg_features = self.Enc_eeg(eeg)
                 
                 # print("eeg feat", eeg_features.size())
@@ -351,6 +375,8 @@ class IE():
 
                 loss_cos = (loss_eeg + loss_img) / 2
 
+                # loss_cos = self.criterion_siglip(eeg_features, img_features)
+
                 # total loss
                 loss = loss_cos
 
@@ -374,14 +400,14 @@ class IE():
                         vlabels = torch.arange(veeg.shape[0])
                         vlabels = vlabels.cuda().type(self.LongTensor)
 
-                        veeg_features = self.Enc_eeg([veeg], ['eeg'] , get_dino_head=False)
-                        veeg_features = torch.stack(veeg_features, dim=0).view(veeg.size(0), -1)
+                        _, veeg_features  = self.Enc_eeg([veeg], ['eeg'] , get_dino_head=False)
+                        veeg_features  = torch.stack(veeg_features, dim=0).view(veeg.size(0), -1)
                         # veeg_features = self.Enc_eeg(veeg)
                         
                         veeg_features = self.Proj_eeg(veeg_features)
                         vimg_features = self.Proj_img(vimg_features)
 
-                        # veeg_features, eeg_cross_attn_weights = self.Enc_eeg.module.cross_attention_fuse(eeg_features=veeg_features,img_features=vimg_features) # cross atn between image and eeg
+                        # # veeg_features, eeg_cross_attn_weights = self.Enc_eeg.module.cross_attention_fuse(eeg_features=veeg_features,img_features=vimg_features) # cross atn between image and eeg
 
                         veeg_features = veeg_features / veeg_features.norm(dim=1, keepdim=True)
                         vimg_features = vimg_features / vimg_features.norm(dim=1, keepdim=True)
@@ -392,49 +418,51 @@ class IE():
 
                         vloss_eeg = self.criterion_cls(vlogits_per_eeg, vlabels)
                         vloss_img = self.criterion_cls(vlogits_per_img, vlabels)
-
                         vloss = (vloss_eeg + vloss_img) / 2
+
+                        # vloss = self.criterion_siglip(veeg_features, vimg_features)
+
                         running_loss_val += vloss.item()
 
                         if vloss <= best_loss_val:
                             best_loss_val = vloss
                             best_epoch = e + 1
-                            # torch.save(self.Enc_eeg.module.state_dict(), './model/' + model_idx + 'Enc_eeg_cls.pth')
+                            torch.save(self.Enc_eeg.module.state_dict(), './model/' + model_idx + 'Enc_eeg_cls.pth')
                             torch.save(self.Proj_eeg.module.state_dict(), './model/' + model_idx + 'Proj_eeg_cls.pth')
                             torch.save(self.Proj_img.module.state_dict(), './model/' + model_idx + 'Proj_img_cls.pth')
 
                 
-                loss_egg = loss_eeg.detach().cpu().numpy()
-                loss_img = loss_img.detach().cpu().numpy()
+                # loss_egg = loss_eeg.detach().cpu().numpy()
+                # loss_img = loss_img.detach().cpu().numpy()
 
-                vloss_eeg = vloss_eeg.detach().cpu().numpy()
-                vloss_img = vloss_img.detach().cpu().numpy()
+                # vloss_eeg = vloss_eeg.detach().cpu().numpy()
+                # vloss_img = vloss_img.detach().cpu().numpy()
 
                 avg_running_loss_val = running_loss_val/len(self.val_dataloader)
                 avg_running_loss = running_loss/len(self.dataloader)
 
-
-                vloss = vloss.detach().cpu().numpy()
-                loss = loss.detach().cpu().numpy()
+                # vloss = vloss.detach().cpu().numpy()
+                # loss = loss.detach().cpu().numpy()
+                mem_stat_dict = memory_stats(get_dict=True)
 
                 print('Epoch:', e,
-                      '  Cos eeg: %.4f' % loss_egg,
-                      '  Cos img: %.4f' % loss_img,
-                      '  loss val: %.4f' % vloss,
+                    #   '  Cos eeg: %.4f' % loss_egg,
+                    #   '  Cos img: %.4f' % loss_img,
+                      '  loss : %.4f' % avg_running_loss,
+                      '  loss val: %.4f' % avg_running_loss_val,
                       )
-                self.log_write.write('Epoch %d: Cos eeg: %.4f, Cos img: %.4f, loss val: %.4f\n'%(e, loss_eeg, loss_img, vloss))
+                # self.log_write.write('Epoch %d: loss: %.4f, loss val: %.4f\n'%(e, loss, vloss))
 
                 wandb.log({
                     "Epoch": e if e>0 else 1,
-                    "Cos eeg": loss_eeg,
-                    "Cos img": loss_img,
+                    # "Cos eeg": loss_eeg,
+                    # "Cos img": loss_img,
                     "loss": avg_running_loss,
-                    "Cos veeg": vloss_eeg,
-                    "Cos vimg": vloss_img,
+                    # "Cos veeg": vloss_eeg,
+                    # "Cos vimg": vloss_img,
                     "loss val": avg_running_loss_val,
+                    "resources_stats/": mem_stat_dict
                 })
-
-                memory_stats()
 
 
         # * test part
@@ -444,7 +472,7 @@ class IE():
         top3 = 0
         top5 = 0
 
-        # self.Enc_eeg.load_state_dict(torch.load('./model/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
+        self.Enc_eeg.load_state_dict(torch.load('./model/' + model_idx + 'Enc_eeg_cls.pth'), strict=False)
         self.Proj_eeg.load_state_dict(torch.load('./model/' + model_idx + 'Proj_eeg_cls.pth'), strict=False)
         self.Proj_img.load_state_dict(torch.load('./model/' + model_idx + 'Proj_img_cls.pth'), strict=False)
 
@@ -458,8 +486,8 @@ class IE():
                 tlabel = tlabel.type(self.LongTensor)
                 all_center = all_center.type(self.Tensor)           
 
-                tfea = self.Enc_eeg([teeg], ['eeg'] , get_dino_head=False)
-                tfea = torch.stack(tfea, dim=0).view(teeg.size(0), -1)
+                _, tbase_feat = self.Enc_eeg([teeg], ['eeg'] , get_dino_head=False)
+                tfea = torch.stack(tbase_feat, dim=0).view(teeg.size(0), -1)
                 # tfea = self.Enc_eeg(teeg)
                 tfea = self.Proj_eeg(tfea)
 

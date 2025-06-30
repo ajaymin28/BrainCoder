@@ -12,6 +12,48 @@ import torch.nn.functional as F
 import torch.optim
 import torch.backends.cudnn as cudnn; cudnn.benchmark = True
 import numpy as np
+from archs.common_layers import ResidualAdd
+
+class DynamicLSTM(nn.Module):
+    def __init__(self,channels=63, time=250,num_layers=4, n_classes=40,hidden_size=768, proj_dim=768,drop_proj=0.5,lstm_dropout=0.5, use_layer="hidden"):
+        super(DynamicLSTM, self).__init__()
+
+        self.lstm = nn.LSTM(input_size=channels,
+                            hidden_size=hidden_size,
+                            num_layers=num_layers,
+                            dropout=lstm_dropout,
+                            batch_first=True)
+        
+        self.use_layer = use_layer
+
+        self.feature_head = nn.Sequential(
+            nn.Linear(hidden_size,proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            ResidualAdd(nn.Sequential(
+                nn.GELU(),
+                nn.Linear(proj_dim, proj_dim),
+                nn.Dropout(drop_proj),
+            )), 
+        )
+    
+    def forward(self,x):
+        if len(x.shape) == 4:    # (B, 1, 63, 250)
+            x = x.squeeze(1)     # (B, 63, 250)
+
+        x = x.transpose(2,1)     # (B, 250, 63)
+
+        output, (hidden_state,cell_state) = self.lstm(x) # output (B, 250, hidden_size)   (hn,cn) = (num_layers, B, hidden_size) 
+
+        if self.use_layer=="hidden":
+            x = self.feature_head(F.elu(hidden_state[-1])) # last hidden state
+        elif self.use_layer=="cell":
+            x = self.feature_head(F.elu(cell_state[-1])) # last cell state
+        elif self.use_layer=="output":
+            x = self.feature_head(F.elu(output[:,-1,:])) # last time sample
+
+        return x
+
+
 
 class TripletLoss(nn.Module):
     def __init__(self, margin=0.5):

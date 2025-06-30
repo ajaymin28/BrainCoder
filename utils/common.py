@@ -281,12 +281,18 @@ def clean_mem(objects_to_del:list[str]):
     except:
         pass
 
+def config_to_dict(obj):
+    # Get all relevant attributes (class + instance, skip dunder and callables)
+    keys = [
+        k for k in set(obj.__class__.__dict__.keys()).union(vars(obj).keys())
+        if not k.startswith("__") and not callable(getattr(obj, k, None))
+    ]
+    def to_serializable(v):
+        if isinstance(v, torch.device):
+            return str(v)
+        return v
+    return {k: to_serializable(getattr(obj, k)) for k in keys}
 
-def config_to_dict(config_class: TrainConfig) -> Dict[str, Any]:
-    """Converts a TrainConfig object to a dictionary for logging."""
-    # Convert torch.device to string for serialization
-    return {k: (v if not isinstance(v, torch.device) else str(v))
-            for k, v in vars(config_class).items() if not k.startswith("__")}
 
 def compute_alpha(config: TrainConfig, dataloader_len: int) -> float:
     """
